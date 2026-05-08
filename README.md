@@ -49,10 +49,29 @@ ln -s "$PWD/gdiff/bin/gdiff" ~/.local/bin/gdiff
 
 ## Use it from Soloterm
 
-Soloterm has no global config, but you can:
+Soloterm has no global config, so you wire `gdiff` per project. Two paths:
 
-- Add a process in any Solo project: command `gdiff`. Click the tab → browser pops with the diff.
-- Or just run `gdiff` in any Solo terminal tab — works the same.
+**Option A — paste into your repo's `solo.yml`** ([example](examples/solo.yml)):
+
+```yaml
+processes:
+  Diff (HTML):
+    command: gdiff
+    auto_start: false
+  Diff (terminal):
+    command: bash -lc 'gdiff --unified'
+    auto_start: false
+```
+
+Solo will prompt you to trust the new commands once. Click the `Diff (HTML)` tab → browser pops with the side-by-side view. Click `Diff (terminal)` for the colored unified diff in-pane.
+
+**Option B — add via Solo UI** (no file change):
+
+1. Open the project in Solo.
+2. Add Process → Command → `gdiff` → Save.
+3. Click the tab any time you want to see the current diff.
+
+Either way, you can also just run `gdiff` in any Solo terminal tab.
 
 ## License
 

@@ -1,0 +1,16 @@
+# Example solo.yml fragment — drop the `processes` block into your repo's
+# solo.yml to get one-click git diff tabs inside Soloterm.
+#
+# Soloterm has no global config; solo.yml is per-project. After editing,
+# Solo will ask you to trust the new commands once.
+#
+# Requires gdiff installed: https://github.com/lord-eagle/gdiff
+
+processes:
+  Diff (HTML):
+    command: gdiff
+    auto_start: false
+
+  Diff (terminal):
+    command: bash -lc 'gdiff --unified'
+    auto_start: false
