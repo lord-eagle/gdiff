@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# gdiff — open the current repo's git diff as a side-by-side HTML view in your browser.
+#
+# Usage:
+#   gdiff                # working tree + staged diff vs HEAD
+#   gdiff <ref>          # diff vs <ref> (e.g. gdiff main, gdiff HEAD~3)
+#   gdiff <a> <b>        # diff between two refs
+#   gdiff --unified      # plain colored unified diff in terminal (no browser)
+#   gdiff --help
+
+set -euo pipefail
+
+print_help() {
+  cat <<'EOF'
+gdiff — git diff as a beautiful side-by-side HTML view
+
+Usage:
+  gdiff                  Show working tree + staged changes
+  gdiff <ref>            Diff vs <ref> (e.g. main, HEAD~3, origin/main)
+  gdiff <a> <b>          Diff between two refs
+  gdiff -u, --unified    Plain colored unified diff in terminal
+  gdiff -h, --help       Show this help
+
+Requires: git, node (for npx). On first run npx fetches diff2html-cli (cached after).
+EOF
+}
+
+mode="html"
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help) print_help; exit 0 ;;
+    -u|--unified) mode="unified" ;;
+    *) args+=("$arg") ;;
+  esac
+done
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "gdiff: not inside a git repository" >&2
+  exit 1
+fi
+
+collect_diff() {
+  local color_flag="${1:-never}"
+  if [ "${#args[@]}" -eq 0 ]; then
+    git --no-pager diff "--color=$color_flag"
+    git --no-pager diff --cached "--color=$color_flag"
+  elif [ "${#args[@]}" -eq 1 ]; then
+    git --no-pager diff "--color=$color_flag" "${args[0]}"
+  else
+    git --no-pager diff "--color=$color_flag" "${args[0]}" "${args[1]}"
+  fi
+}
+
+if [ "$mode" = "unified" ]; then
+  collect_diff always
+  exit 0
+fi
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "gdiff: 'npx' not found. Install Node.js (https://nodejs.org) or run with --unified." >&2
+  exit 1
+fi
+
+tmp_dir="$(mktemp -d -t gdiff.XXXXXX)"
+out="$tmp_dir/diff.html"
+
+diff_text="$(collect_diff never)"
+if [ -z "$diff_text" ]; then
+  echo "gdiff: no changes to show."
+  exit 0
+fi
+
+repo_name="$(basename "$(git rev-parse --show-toplevel)")"
+title="gdiff — $repo_name"
+
+printf '%s' "$diff_text" | npx --yes diff2html-cli \
+  --style side \
+  --highlightCode true \
+  --summary closed \
+  --title "$title" \
+  -i stdin \
+  -F "$out" >/dev/null
+
+case "$(uname -s)" in
+  Darwin) open "$out" ;;
+  Linux)  xdg-open "$out" >/dev/null 2>&1 || echo "Open: $out" ;;
+  *)      echo "Open: $out" ;;
+esac
