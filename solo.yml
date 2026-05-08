@@ -9,6 +9,14 @@ processes:
     command: bash -lc 'gdiff --unified'
     auto_start: false
 
+  Diff last commit (HTML):
+    command: bash -lc 'gdiff HEAD~1 HEAD'
+    auto_start: false
+
+  Diff last commit (terminal):
+    command: bash -lc 'gdiff --unified HEAD~1 HEAD'
+    auto_start: false
+
   Help:
     command: bash -lc 'gdiff --help'
     auto_start: false

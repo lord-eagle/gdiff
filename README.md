@@ -19,12 +19,9 @@ curl -fsSL https://raw.githubusercontent.com/lord-eagle/gdiff/main/install.sh | 
 
 Drops `gdiff` into `~/.local/bin`. Add it to `PATH` if not already.
 
-### Homebrew (tap)
+### Homebrew (tap) — coming soon
 
-```sh
-brew tap lord-eagle/gdiff https://github.com/lord-eagle/gdiff.git
-brew install gdiff
-```
+Tracking in [issue #1](https://github.com/lord-eagle/gdiff/issues/1). For now use the curl installer above.
 
 ### Manual
 
@@ -51,19 +48,18 @@ ln -s "$PWD/gdiff/bin/gdiff" ~/.local/bin/gdiff
 
 Soloterm has no global config, so you wire `gdiff` per project. Two paths:
 
-**Option A — paste into your repo's `solo.yml`** ([example](examples/solo.yml)):
+**Option A — drop the example `solo.yml` into your project (one-liner):**
 
-```yaml
-processes:
-  Diff (HTML):
-    command: gdiff
-    auto_start: false
-  Diff (terminal):
-    command: bash -lc 'gdiff --unified'
-    auto_start: false
+```sh
+curl -fsSL https://raw.githubusercontent.com/lord-eagle/gdiff/main/examples/solo.yml -o solo.yml
 ```
 
-Solo will prompt you to trust the new commands once. Click the `Diff (HTML)` tab → browser pops with the side-by-side view. Click `Diff (terminal)` for the colored unified diff in-pane.
+Reload the project in Solo. Solo prompts to **trust** the YAML commands (security gate) — approve once, then:
+
+- `Diff (HTML)` tab → browser pops with side-by-side view
+- `Diff (terminal)` tab → ANSI unified diff in-pane
+
+If your repo already has a `solo.yml`, copy the `processes` block from [examples/solo.yml](examples/solo.yml) into yours instead of overwriting.
 
 **Option B — add via Solo UI** (no file change):
 
