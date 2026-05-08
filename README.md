@@ -11,30 +11,13 @@ gdiff --unified      # plain colored unified diff in terminal
 
 ## Install
 
-### Quick (curl) — public repo only
+### Quick (curl)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/lord-eagle/gdiff/main/install.sh | bash
 ```
 
 Drops `gdiff` into `~/.local/bin`. Add it to `PATH` if not already.
-
-### Private repo (gh cli)
-
-While the repo is private, use the GitHub CLI (collaborator access required):
-
-```sh
-gh auth login                                # one-time, if not already
-gh api repos/lord-eagle/gdiff/contents/install.sh \
-  -H "Accept: application/vnd.github.raw" | bash
-```
-
-Or clone + symlink:
-
-```sh
-gh repo clone lord-eagle/gdiff ~/.gdiff
-mkdir -p ~/.local/bin && ln -sf ~/.gdiff/bin/gdiff ~/.local/bin/gdiff
-```
 
 ### Homebrew (tap)
 
