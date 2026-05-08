@@ -69,6 +69,14 @@ If your repo already has a `solo.yml`, copy the `processes` block from [examples
 
 Either way, you can also just run `gdiff` in any Solo terminal tab.
 
+## Credits
+
+`gdiff` is a thin bash wrapper. The actual side-by-side HTML rendering is done by:
+
+- [**diff2html-cli**](https://github.com/rtfpessoa/diff2html-cli) and [**diff2html**](https://github.com/rtfpessoa/diff2html) by [@rtfpessoa](https://github.com/rtfpessoa) — MIT-licensed. Fetched at runtime via `npx --yes` (cached after first run); not bundled.
+
+Huge thanks to that project — `gdiff` would not exist without it.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
