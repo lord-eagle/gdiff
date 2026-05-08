@@ -1,0 +1,14 @@
+name: gdiff
+
+processes:
+  Diff (HTML):
+    command: gdiff
+    auto_start: false
+
+  Diff (terminal):
+    command: bash -lc 'gdiff --unified'
+    auto_start: false
+
+  Help:
+    command: bash -lc 'gdiff --help'
+    auto_start: false
