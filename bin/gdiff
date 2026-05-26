@@ -71,8 +71,511 @@ if [ -z "$diff_text" ]; then
   exit 0
 fi
 
-repo_name="$(basename "$(git rev-parse --show-toplevel)")"
+repo_root="$(git rev-parse --show-toplevel)"
+repo_name="$(basename "$repo_root")"
 title="gdiff — $repo_name"
+
+add_review_tools() {
+  cat >>"$out" <<'EOF'
+<style>
+  .gdiff-review-bar {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 20;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 8px;
+    background: #24292f;
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(140, 149, 159, 0.35);
+    color: #fff;
+    font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .gdiff-review-bar button,
+  .gdiff-review-panel button {
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #f6f8fa;
+    color: #24292f;
+    cursor: pointer;
+    font: inherit;
+    padding: 6px 10px;
+  }
+  .gdiff-review-bar button:hover,
+  .gdiff-review-panel button:hover {
+    background: #eef1f4;
+  }
+  .gdiff-review-bar .gdiff-primary,
+  .gdiff-review-panel .gdiff-primary {
+    border-color: #1f883d;
+    background: #1f883d;
+    color: #fff;
+  }
+  .gdiff-review-bar .gdiff-primary:hover,
+  .gdiff-review-panel .gdiff-primary:hover {
+    background: #1a7f37;
+  }
+  .gdiff-review-panel {
+    width: min(720px, calc((100vw - 80px) / 2));
+    max-width: calc(100vw - 80px);
+    box-sizing: border-box;
+    padding: 12px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #fff;
+    color: #24292f;
+    font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .gdiff-review-editor-row > td {
+    padding: 8px 12px;
+    background: #f6f8fa;
+    vertical-align: top;
+  }
+  .gdiff-review-spacer-row > td {
+    padding: 0;
+    border: 0;
+  }
+  .gdiff-review-target {
+    margin: 0 0 8px;
+    color: #57606a;
+    overflow-wrap: anywhere;
+  }
+  .gdiff-review-code {
+    margin: 0 0 8px;
+    max-height: 110px;
+    overflow: auto;
+    padding: 8px;
+    border-radius: 6px;
+    background: #f6f8fa;
+    color: #24292f;
+    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+  }
+  .gdiff-review-panel textarea {
+    width: 100%;
+    min-height: 110px;
+    box-sizing: border-box;
+    resize: vertical;
+    margin: 0 0 8px;
+    padding: 8px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    color: #24292f;
+    font: inherit;
+  }
+  .gdiff-review-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+  .gdiff-selected-line > td {
+    background: #ddf4ff !important;
+    box-shadow: inset 3px 0 #0969da;
+  }
+  .gdiff-commented-line {
+    background: #fff8c5 !important;
+  }
+  .gdiff-commented-line::after {
+    content: " comment";
+    color: #9a6700;
+    direction: ltr;
+    font-size: 11px;
+  }
+  @media (prefers-color-scheme: dark) {
+    .gdiff-review-panel {
+      border-color: #30363d;
+      background: #161b22;
+      color: #e6edf3;
+    }
+    .gdiff-review-editor-row > td {
+      background: #0d1117;
+    }
+    .gdiff-review-target {
+      color: #8b949e;
+    }
+    .gdiff-review-code,
+    .gdiff-review-panel textarea {
+      border-color: #30363d;
+      background: #0d1117;
+      color: #e6edf3;
+    }
+    .gdiff-commented-line {
+      background: rgba(210, 153, 34, 0.25) !important;
+    }
+    .gdiff-selected-line > td {
+      background: rgba(56, 139, 253, 0.18) !important;
+    }
+  }
+</style>
+<script>
+(function () {
+  var comments = new Map();
+  var currentSelection = null;
+  var anchorTarget = null;
+  var dragTarget = null;
+  var isDragging = false;
+  var storageKey = "gdiff-review-comments:" + location.pathname;
+
+  function text(node) {
+    return (node && node.textContent ? node.textContent : "").replace(/\u00a0/g, " ").trim();
+  }
+
+  function lineKind(row) {
+    var codeCell = row.querySelector("td:nth-child(2)");
+    if (!codeCell) return "context";
+    if (codeCell.classList.contains("d2h-ins")) return "added";
+    if (codeCell.classList.contains("d2h-del")) return "removed";
+    if (codeCell.classList.contains("d2h-info")) return "hunk";
+    return "context";
+  }
+
+  function fileName(wrapper) {
+    return text(wrapper.querySelector(".d2h-file-header .d2h-file-name")) || "unknown";
+  }
+
+  function lineCode(row) {
+    var code = row.querySelector(".d2h-code-line-ctn");
+    if (!code) return text(row.querySelector(".d2h-code-side-line, .d2h-code-line"));
+    return code.textContent.replace(/\u00a0/g, " ");
+  }
+
+  function targetFromRow(row) {
+    var cell = row && row.querySelector(".d2h-code-side-linenumber, .d2h-code-linenumber");
+    if (!cell) return null;
+    var row = cell.closest("tr");
+    var wrapper = cell.closest(".d2h-file-wrapper");
+    var sideDiff = cell.closest(".d2h-file-side-diff");
+    var line = text(cell);
+    if (!row || !wrapper || !line || !/^\d+$/.test(line)) return null;
+    var side = "new";
+    if (sideDiff) {
+      side = Array.prototype.indexOf.call(sideDiff.parentElement.children, sideDiff) === 0 ? "old" : "new";
+    } else if (cell.querySelector(".line-num1") && !cell.querySelector(".line-num2")) {
+      side = "old";
+    }
+    var file = fileName(wrapper);
+    var kind = lineKind(row);
+    return {
+      id: [file, side, line, kind].join(":"),
+      file: file,
+      side: side,
+      line: Number(line),
+      kind: kind,
+      code: lineCode(row),
+      row: row,
+      cell: cell
+    };
+  }
+
+  function targetFromEvent(event) {
+    if (event.target.closest(".gdiff-review-panel, .gdiff-review-bar")) return null;
+    return targetFromRow(event.target.closest("tr"));
+  }
+
+  function allTargetsInTable(target) {
+    return Array.prototype.slice.call(target.row.parentElement.querySelectorAll("tr"))
+      .map(targetFromRow)
+      .filter(function (candidate) {
+        return candidate &&
+          candidate.file === target.file &&
+          candidate.side === target.side &&
+          candidate.row.parentElement === target.row.parentElement;
+      });
+  }
+
+  function visualRows(tbody) {
+    if (!tbody) return [];
+    return Array.prototype.slice.call(tbody.children).filter(function (row) {
+      return row.id !== "gdiff-review-editor-row" && row.id !== "gdiff-review-spacer-row";
+    });
+  }
+
+  function selectionFromTargets(start, end) {
+    if (!start || !end || start.file !== end.file || start.side !== end.side) return null;
+    if (start.row.parentElement !== end.row.parentElement) return null;
+    var targets = allTargetsInTable(start);
+    var startIndex = targets.findIndex(function (target) { return target.row === start.row; });
+    var endIndex = targets.findIndex(function (target) { return target.row === end.row; });
+    if (startIndex < 0 || endIndex < 0) return null;
+    var selected = targets.slice(Math.min(startIndex, endIndex), Math.max(startIndex, endIndex) + 1);
+    var lines = selected.map(function (target) { return target.line; });
+    var kinds = selected.map(function (target) { return target.kind; });
+    var kind = kinds.every(function (value) { return value === kinds[0]; }) ? kinds[0] : "mixed";
+    var startLine = Math.min.apply(Math, lines);
+    var endLine = Math.max.apply(Math, lines);
+    return {
+      id: [start.file, start.side, startLine + "-" + endLine, kind].join(":"),
+      file: start.file,
+      side: start.side,
+      startLine: startLine,
+      endLine: endLine,
+      kind: kind,
+      code: selected.map(function (target) { return target.code; }).join("\n"),
+      rows: selected.map(function (target) { return target.row; }),
+      cells: selected.map(function (target) { return target.cell; }),
+      tableBody: start.row.parentElement,
+      sidePane: start.row.closest(".d2h-file-side-diff"),
+      rowIndex: visualRows(start.row.parentElement).indexOf(selected[selected.length - 1].row)
+    };
+  }
+
+  function loadComments() {
+    try {
+      JSON.parse(localStorage.getItem(storageKey) || "[]").forEach(function (comment) {
+        if (comment.side !== "old" && comment.side !== "new") return;
+        if (!/^(added|removed|context|hunk|mixed)$/.test(comment.kind)) comment.kind = "mixed";
+        if (!comment.startLine) comment.startLine = comment.line;
+        if (!comment.endLine) comment.endLine = comment.line;
+        comment.id = [comment.file, comment.side, comment.startLine + "-" + comment.endLine, comment.kind].join(":");
+        comments.set(comment.id, comment);
+      });
+    } catch (error) {
+      comments.clear();
+    }
+  }
+
+  function saveComments() {
+    localStorage.setItem(storageKey, JSON.stringify(Array.from(comments.values())));
+  }
+
+  function refreshMarkers() {
+    document.querySelectorAll(".gdiff-commented-line").forEach(function (cell) {
+      cell.classList.remove("gdiff-commented-line");
+      cell.removeAttribute("data-gdiff-comment-id");
+    });
+    comments.forEach(function (comment) {
+      var cells = Array.prototype.slice.call(document.querySelectorAll(".d2h-code-side-linenumber"));
+      cells.forEach(function (cell) {
+        var target = targetFromRow(cell.closest("tr"));
+        var startLine = comment.startLine || comment.line;
+        var endLine = comment.endLine || comment.line;
+        if (!target ||
+          target.file !== comment.file ||
+          target.side !== comment.side ||
+          target.line < startLine ||
+          target.line > endLine) return;
+        cell.classList.add("gdiff-commented-line");
+        cell.setAttribute("data-gdiff-comment-id", comment.id);
+      });
+    });
+    document.getElementById("gdiff-review-count").textContent = String(comments.size);
+  }
+
+  function clearSelection() {
+    document.querySelectorAll(".gdiff-selected-line").forEach(function (row) {
+      row.classList.remove("gdiff-selected-line");
+    });
+  }
+
+  function lineLabel(selection) {
+    return selection.startLine === selection.endLine ? String(selection.startLine) : selection.startLine + "-" + selection.endLine;
+  }
+
+  function ensurePanelRow(selection) {
+    var row = document.getElementById("gdiff-review-editor-row");
+    var spacer = document.getElementById("gdiff-review-spacer-row");
+    if (spacer) spacer.remove();
+    if (!row) {
+      row = document.createElement("tr");
+      row.id = "gdiff-review-editor-row";
+      row.className = "gdiff-review-editor-row";
+      row.innerHTML = '<td colspan="2"><section id="gdiff-review-panel" class="gdiff-review-panel">' +
+        '<p id="gdiff-review-target" class="gdiff-review-target"></p>' +
+        '<pre id="gdiff-review-code" class="gdiff-review-code"></pre>' +
+        '<textarea id="gdiff-review-comment" placeholder="Leave feedback for this line"></textarea>' +
+        '<div class="gdiff-review-actions">' +
+        '  <button type="button" id="gdiff-review-cancel">Cancel</button>' +
+        '  <button type="button" id="gdiff-review-save" class="gdiff-primary">Save comment</button>' +
+        '</div>' +
+        '</section></td>';
+      row.querySelector("#gdiff-review-save").addEventListener("click", saveCurrentComment);
+      row.querySelector("#gdiff-review-cancel").addEventListener("click", closePanel);
+      row.querySelector("#gdiff-review-comment").addEventListener("keydown", function (event) {
+        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") saveCurrentComment();
+        if (event.key === "Escape") closePanel();
+      });
+    }
+    selection.rows[selection.rows.length - 1].after(row);
+    if (selection.sidePane) {
+      row.querySelector(".gdiff-review-panel").style.width = Math.max(180, selection.sidePane.clientWidth - 32) + "px";
+      var panes = Array.prototype.slice.call(selection.sidePane.parentElement.querySelectorAll(".d2h-file-side-diff"));
+      var siblingPane = panes.find(function (pane) { return pane !== selection.sidePane; });
+      var siblingRows = siblingPane ? visualRows(siblingPane.querySelector("tbody.d2h-diff-tbody")) : [];
+      var siblingRow = siblingRows[selection.rowIndex];
+      if (siblingRow) {
+        spacer = document.createElement("tr");
+        spacer.id = "gdiff-review-spacer-row";
+        spacer.className = "gdiff-review-spacer-row";
+        spacer.innerHTML = '<td colspan="2"></td>';
+        siblingRow.after(spacer);
+        spacer.querySelector("td").style.height = row.getBoundingClientRect().height + "px";
+      }
+    }
+    return row;
+  }
+
+  function previewSelection(selection) {
+    if (!selection) return;
+    clearSelection();
+    selection.rows.forEach(function (row) {
+      row.classList.add("gdiff-selected-line");
+    });
+  }
+
+  function openPanel(selection) {
+    currentSelection = selection;
+    previewSelection(selection);
+    ensurePanelRow(selection);
+    document.getElementById("gdiff-review-target").textContent =
+      selection.file + ":" + lineLabel(selection) + " (" + selection.side + ", " + selection.kind + ")";
+    document.getElementById("gdiff-review-code").textContent = selection.code;
+    document.getElementById("gdiff-review-comment").value = (comments.get(selection.id) || {}).comment || "";
+    document.getElementById("gdiff-review-comment").focus();
+  }
+
+  function closePanel() {
+    var row = document.getElementById("gdiff-review-editor-row");
+    var spacer = document.getElementById("gdiff-review-spacer-row");
+    if (row) row.remove();
+    if (spacer) spacer.remove();
+    clearSelection();
+    currentSelection = null;
+  }
+
+  function saveCurrentComment() {
+    if (!currentSelection) return;
+    var value = document.getElementById("gdiff-review-comment").value.trim();
+    if (!value) {
+      comments.delete(currentSelection.id);
+    } else {
+      comments.set(currentSelection.id, {
+        id: currentSelection.id,
+        file: currentSelection.file,
+        side: currentSelection.side,
+        startLine: currentSelection.startLine,
+        endLine: currentSelection.endLine,
+        kind: currentSelection.kind,
+        code: currentSelection.code,
+        comment: value
+      });
+    }
+    saveComments();
+    refreshMarkers();
+    closePanel();
+  }
+
+  function buildPrompt() {
+    var list = Array.from(comments.values()).sort(function (a, b) {
+      return a.file.localeCompare(b.file) || (a.startLine || a.line) - (b.startLine || b.line) || a.side.localeCompare(b.side);
+    });
+    var xml = function (value) {
+      return String(value).replace(/[<>&'"]/g, function (char) {
+        return {
+          "<": "&lt;",
+          ">": "&gt;",
+          "&": "&amp;",
+          "'": "&apos;",
+          "\"": "&quot;"
+        }[char];
+      });
+    };
+    var lines = [
+      "Please address the following line-level review feedback from the git diff.",
+      "",
+      "Before editing, inspect all comments and target locations first so line numbers do not drift while you work.",
+      "Then address the comments one by one.",
+      "",
+      "Return a concise summary of the changes you made and call out any feedback you could not apply.",
+      "",
+      "<review_feedback>"
+    ];
+    list.forEach(function (comment, index) {
+      lines.push("  <comment index=\"" + (index + 1) + "\">");
+      lines.push("    <file>" + xml(comment.file) + "</file>");
+      lines.push("    <lines side=\"" + xml(comment.side) + "\" kind=\"" + xml(comment.kind) + "\" start=\"" + xml(comment.startLine || comment.line) + "\" end=\"" + xml(comment.endLine || comment.line) + "\" />");
+      lines.push("    <code>" + xml(comment.code) + "</code>");
+      lines.push("    <feedback>" + xml(comment.comment) + "</feedback>");
+      lines.push("  </comment>");
+    });
+    lines.push("</review_feedback>");
+    return lines.join("\n");
+  }
+
+  function copyComments() {
+    var prompt = buildPrompt();
+    if (!comments.size) {
+      prompt = "No gdiff review comments have been added.";
+    }
+    navigator.clipboard.writeText(prompt).then(function () {
+      var button = document.getElementById("gdiff-copy-comments");
+      var label = button.textContent;
+      button.textContent = "Copied";
+      setTimeout(function () { button.textContent = label; }, 1200);
+    }, function () {
+      window.prompt("Copy review feedback", prompt);
+    });
+  }
+
+  function clearComments() {
+    if (!comments.size || !confirm("Clear all gdiff review comments?")) return;
+    comments.clear();
+    saveComments();
+    refreshMarkers();
+    closePanel();
+  }
+
+  function addUi() {
+    var bar = document.createElement("div");
+    bar.className = "gdiff-review-bar";
+    bar.innerHTML = [
+      '<span><span id="gdiff-review-count">0</span> comments</span>',
+      '<button type="button" id="gdiff-copy-comments" class="gdiff-primary">Copy prompt</button>',
+      '<button type="button" id="gdiff-clear-comments">Clear</button>'
+    ].join("");
+    document.body.appendChild(bar);
+
+    document.getElementById("gdiff-copy-comments").addEventListener("click", copyComments);
+    document.getElementById("gdiff-clear-comments").addEventListener("click", clearComments);
+  }
+
+  document.addEventListener("mousedown", function (event) {
+    var target = targetFromEvent(event);
+    if (!target) return;
+    dragTarget = target;
+    isDragging = true;
+    if (!event.shiftKey) anchorTarget = target;
+    event.preventDefault();
+    previewSelection(selectionFromTargets(anchorTarget, target));
+  });
+
+  document.addEventListener("mouseover", function (event) {
+    if (!isDragging || !dragTarget) return;
+    var target = targetFromEvent(event);
+    if (!target || target.row === dragTarget.row) return;
+    dragTarget = target;
+    previewSelection(selectionFromTargets(anchorTarget, target));
+  });
+
+  document.addEventListener("mouseup", function (event) {
+    if (!isDragging) return;
+    isDragging = false;
+    var target = targetFromEvent(event) || dragTarget;
+    var start = event.shiftKey && anchorTarget ? anchorTarget : anchorTarget || target;
+    var selection = selectionFromTargets(start, target);
+    if (!selection) return;
+    anchorTarget = target;
+    openPanel(selection);
+  });
+
+  loadComments();
+  addUi();
+  refreshMarkers();
+})();
+</script>
+EOF
+}
 
 printf '%s' "$diff_text" | npx --yes diff2html-cli \
   --style side \
@@ -81,6 +584,13 @@ printf '%s' "$diff_text" | npx --yes diff2html-cli \
   --title "$title" \
   -i stdin \
   -F "$out" >/dev/null
+
+add_review_tools
+
+if [ "${GDIFF_OPEN:-1}" = "0" ]; then
+  echo "Open: $out"
+  exit 0
+fi
 
 case "$(uname -s)" in
   Darwin) open "$out" ;;
