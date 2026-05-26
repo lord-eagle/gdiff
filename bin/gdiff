@@ -22,6 +22,9 @@ Usage:
   gdiff -h, --help       Show this help
 
 Requires: git, node (for npx). On first run npx fetches diff2html-cli (cached after).
+
+Environment:
+  GDIFF_OPEN=0          Skip opening the browser; print the HTML path instead.
 EOF
 }
 
@@ -75,7 +78,20 @@ repo_root="$(git rev-parse --show-toplevel)"
 repo_name="$(basename "$repo_root")"
 title="gdiff — $repo_name"
 
+# Stable per-(repo, diff-args) key so localStorage comments survive reruns.
+storage_seed="$repo_root|${args[*]-}"
+if command -v shasum >/dev/null 2>&1; then
+  storage_id="$(printf '%s' "$storage_seed" | shasum -a 1 | awk '{print $1}')"
+elif command -v sha1sum >/dev/null 2>&1; then
+  storage_id="$(printf '%s' "$storage_seed" | sha1sum | awk '{print $1}')"
+else
+  storage_id="$(printf '%s' "$storage_seed" | od -An -tx1 | tr -d ' \n' | cut -c1-40)"
+fi
+
 add_review_tools() {
+  cat >>"$out" <<EOF
+<script>window.__gdiffStorageKey = "gdiff-review-comments:$storage_id";</script>
+EOF
   cat >>"$out" <<'EOF'
 <style>
   .gdiff-review-bar {
@@ -176,12 +192,41 @@ add_review_tools() {
   }
   .gdiff-commented-line {
     background: #fff8c5 !important;
+    box-shadow: inset 3px 0 #d4a72c;
   }
-  .gdiff-commented-line::after {
-    content: " comment";
-    color: #9a6700;
-    direction: ltr;
-    font-size: 11px;
+  .gdiff-review-delete {
+    border-color: #cf222e !important;
+    color: #cf222e;
+    margin-right: auto;
+  }
+  .gdiff-review-delete[disabled] {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .gdiff-review-panel button[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .gdiff-copy-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(15, 20, 25, 0.55);
+  }
+  .gdiff-copy-modal .gdiff-review-panel {
+    width: min(640px, calc(100vw - 48px));
+  }
+  .gdiff-copy-modal textarea {
+    min-height: 220px;
+    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .gdiff-copy-hint {
+    margin: 0 0 8px;
+    color: #57606a;
+    font-size: 12px;
   }
   @media (prefers-color-scheme: dark) {
     .gdiff-review-panel {
@@ -203,20 +248,27 @@ add_review_tools() {
     }
     .gdiff-commented-line {
       background: rgba(210, 153, 34, 0.25) !important;
+      box-shadow: inset 3px 0 #d29922;
     }
     .gdiff-selected-line > td {
       background: rgba(56, 139, 253, 0.18) !important;
+    }
+    .gdiff-copy-hint {
+      color: #8b949e;
     }
   }
 </style>
 <script>
 (function () {
+  // DOM hooks below (.d2h-*) are diff2html-cli class names; if that library
+  // changes its markup we need to update the selectors in lockstep.
   var comments = new Map();
   var currentSelection = null;
   var anchorTarget = null;
   var dragTarget = null;
   var isDragging = false;
-  var storageKey = "gdiff-review-comments:" + location.pathname;
+  var storageKey = window.__gdiffStorageKey ||
+    ("gdiff-review-comments:" + location.pathname);
 
   function text(node) {
     return (node && node.textContent ? node.textContent : "").replace(/\u00a0/g, " ").trim();
@@ -244,11 +296,11 @@ add_review_tools() {
   function targetFromRow(row) {
     var cell = row && row.querySelector(".d2h-code-side-linenumber, .d2h-code-linenumber");
     if (!cell) return null;
-    var row = cell.closest("tr");
+    var parentRow = cell.closest("tr");
     var wrapper = cell.closest(".d2h-file-wrapper");
     var sideDiff = cell.closest(".d2h-file-side-diff");
     var line = text(cell);
-    if (!row || !wrapper || !line || !/^\d+$/.test(line)) return null;
+    if (!parentRow || !wrapper || !line || !/^\d+$/.test(line)) return null;
     var side = "new";
     if (sideDiff) {
       side = Array.prototype.indexOf.call(sideDiff.parentElement.children, sideDiff) === 0 ? "old" : "new";
@@ -256,21 +308,24 @@ add_review_tools() {
       side = "old";
     }
     var file = fileName(wrapper);
-    var kind = lineKind(row);
+    var kind = lineKind(parentRow);
     return {
       id: [file, side, line, kind].join(":"),
       file: file,
       side: side,
       line: Number(line),
       kind: kind,
-      code: lineCode(row),
-      row: row,
+      code: lineCode(parentRow),
+      row: parentRow,
       cell: cell
     };
   }
 
   function targetFromEvent(event) {
-    if (event.target.closest(".gdiff-review-panel, .gdiff-review-bar")) return null;
+    if (event.target.closest(".gdiff-review-panel, .gdiff-review-bar, .gdiff-copy-modal")) return null;
+    // Restrict comment selection to the line-number gutter so users can still
+    // text-select code in the diff body without triggering the editor.
+    if (!event.target.closest(".d2h-code-side-linenumber, .d2h-code-linenumber")) return null;
     return targetFromRow(event.target.closest("tr"));
   }
 
@@ -340,26 +395,40 @@ add_review_tools() {
     localStorage.setItem(storageKey, JSON.stringify(Array.from(comments.values())));
   }
 
+  function commentsByFileSide() {
+    var grouped = new Map();
+    comments.forEach(function (comment) {
+      var key = comment.file + " " + comment.side;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(comment);
+    });
+    return grouped;
+  }
+
   function refreshMarkers() {
     document.querySelectorAll(".gdiff-commented-line").forEach(function (cell) {
       cell.classList.remove("gdiff-commented-line");
       cell.removeAttribute("data-gdiff-comment-id");
     });
-    comments.forEach(function (comment) {
-      var cells = Array.prototype.slice.call(document.querySelectorAll(".d2h-code-side-linenumber"));
-      cells.forEach(function (cell) {
-        var target = targetFromRow(cell.closest("tr"));
+    var grouped = commentsByFileSide();
+    var cells = document.querySelectorAll(".d2h-code-side-linenumber");
+    for (var i = 0; i < cells.length; i++) {
+      var cell = cells[i];
+      var target = targetFromRow(cell.closest("tr"));
+      if (!target) continue;
+      var bucket = grouped.get(target.file + " " + target.side);
+      if (!bucket) continue;
+      for (var j = 0; j < bucket.length; j++) {
+        var comment = bucket[j];
         var startLine = comment.startLine || comment.line;
         var endLine = comment.endLine || comment.line;
-        if (!target ||
-          target.file !== comment.file ||
-          target.side !== comment.side ||
-          target.line < startLine ||
-          target.line > endLine) return;
-        cell.classList.add("gdiff-commented-line");
-        cell.setAttribute("data-gdiff-comment-id", comment.id);
-      });
-    });
+        if (target.line >= startLine && target.line <= endLine) {
+          cell.classList.add("gdiff-commented-line");
+          cell.setAttribute("data-gdiff-comment-id", comment.id);
+          break;
+        }
+      }
+    }
     document.getElementById("gdiff-review-count").textContent = String(comments.size);
   }
 
@@ -386,12 +455,15 @@ add_review_tools() {
         '<pre id="gdiff-review-code" class="gdiff-review-code"></pre>' +
         '<textarea id="gdiff-review-comment" placeholder="Leave feedback for this line"></textarea>' +
         '<div class="gdiff-review-actions">' +
+        '  <button type="button" id="gdiff-review-delete" class="gdiff-review-delete">Delete</button>' +
         '  <button type="button" id="gdiff-review-cancel">Cancel</button>' +
         '  <button type="button" id="gdiff-review-save" class="gdiff-primary">Save comment</button>' +
         '</div>' +
         '</section></td>';
       row.querySelector("#gdiff-review-save").addEventListener("click", saveCurrentComment);
       row.querySelector("#gdiff-review-cancel").addEventListener("click", closePanel);
+      row.querySelector("#gdiff-review-delete").addEventListener("click", deleteCurrentComment);
+      row.querySelector("#gdiff-review-comment").addEventListener("input", updatePanelButtons);
       row.querySelector("#gdiff-review-comment").addEventListener("keydown", function (event) {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") saveCurrentComment();
         if (event.key === "Escape") closePanel();
@@ -433,6 +505,17 @@ add_review_tools() {
     document.getElementById("gdiff-review-code").textContent = selection.code;
     document.getElementById("gdiff-review-comment").value = (comments.get(selection.id) || {}).comment || "";
     document.getElementById("gdiff-review-comment").focus();
+    updatePanelButtons();
+  }
+
+  function updatePanelButtons() {
+    if (!currentSelection) return;
+    var textarea = document.getElementById("gdiff-review-comment");
+    var saveBtn = document.getElementById("gdiff-review-save");
+    var deleteBtn = document.getElementById("gdiff-review-delete");
+    if (!textarea || !saveBtn || !deleteBtn) return;
+    saveBtn.disabled = textarea.value.trim().length === 0;
+    deleteBtn.disabled = !comments.has(currentSelection.id);
   }
 
   function closePanel() {
@@ -447,20 +530,25 @@ add_review_tools() {
   function saveCurrentComment() {
     if (!currentSelection) return;
     var value = document.getElementById("gdiff-review-comment").value.trim();
-    if (!value) {
-      comments.delete(currentSelection.id);
-    } else {
-      comments.set(currentSelection.id, {
-        id: currentSelection.id,
-        file: currentSelection.file,
-        side: currentSelection.side,
-        startLine: currentSelection.startLine,
-        endLine: currentSelection.endLine,
-        kind: currentSelection.kind,
-        code: currentSelection.code,
-        comment: value
-      });
-    }
+    if (!value) return;
+    comments.set(currentSelection.id, {
+      id: currentSelection.id,
+      file: currentSelection.file,
+      side: currentSelection.side,
+      startLine: currentSelection.startLine,
+      endLine: currentSelection.endLine,
+      kind: currentSelection.kind,
+      code: currentSelection.code,
+      comment: value
+    });
+    saveComments();
+    refreshMarkers();
+    closePanel();
+  }
+
+  function deleteCurrentComment() {
+    if (!currentSelection || !comments.has(currentSelection.id)) return;
+    comments.delete(currentSelection.id);
     saveComments();
     refreshMarkers();
     closePanel();
@@ -503,19 +591,51 @@ add_review_tools() {
     return lines.join("\n");
   }
 
-  function copyComments() {
-    var prompt = buildPrompt();
-    if (!comments.size) {
-      prompt = "No gdiff review comments have been added.";
-    }
-    navigator.clipboard.writeText(prompt).then(function () {
-      var button = document.getElementById("gdiff-copy-comments");
-      var label = button.textContent;
-      button.textContent = "Copied";
-      setTimeout(function () { button.textContent = label; }, 1200);
-    }, function () {
-      window.prompt("Copy review feedback", prompt);
+  function flashCopiedButton() {
+    var button = document.getElementById("gdiff-copy-comments");
+    if (!button) return;
+    var label = button.textContent;
+    button.textContent = "Copied";
+    setTimeout(function () { button.textContent = label; }, 1200);
+  }
+
+  function openCopyFallbackModal(content) {
+    var existing = document.getElementById("gdiff-copy-modal");
+    if (existing) existing.remove();
+    var modal = document.createElement("div");
+    modal.id = "gdiff-copy-modal";
+    modal.className = "gdiff-copy-modal";
+    modal.innerHTML = '<section class="gdiff-review-panel">' +
+      '<p class="gdiff-copy-hint">Clipboard access was blocked (this often happens on <code>file://</code>). ' +
+      'Press ' + (navigator.platform.indexOf("Mac") >= 0 ? "⌘C" : "Ctrl+C") + ' to copy, then close.</p>' +
+      '<textarea readonly></textarea>' +
+      '<div class="gdiff-review-actions">' +
+      '  <button type="button" class="gdiff-primary" data-action="close">Close</button>' +
+      '</div>' +
+      '</section>';
+    var textarea = modal.querySelector("textarea");
+    textarea.value = content;
+    function close() { modal.remove(); document.removeEventListener("keydown", onKeydown); }
+    function onKeydown(event) { if (event.key === "Escape") close(); }
+    modal.querySelector('[data-action="close"]').addEventListener("click", close);
+    modal.addEventListener("click", function (event) {
+      if (event.target === modal) close();
     });
+    document.addEventListener("keydown", onKeydown);
+    document.body.appendChild(modal);
+    textarea.focus();
+    textarea.select();
+  }
+
+  function copyComments() {
+    var promptText = comments.size ? buildPrompt() : "No gdiff review comments have been added.";
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(promptText).then(flashCopiedButton, function () {
+        openCopyFallbackModal(promptText);
+      });
+    } else {
+      openCopyFallbackModal(promptText);
+    }
   }
 
   function clearComments() {
@@ -577,7 +697,7 @@ add_review_tools() {
 EOF
 }
 
-printf '%s' "$diff_text" | npx --yes diff2html-cli \
+printf '%s' "$diff_text" | npx --yes 'diff2html-cli@^5.2' \
   --style side \
   --highlightCode true \
   --summary closed \

@@ -48,10 +48,11 @@ ln -s "$PWD/gdiff/bin/gdiff" ~/.local/bin/gdiff
 
 In the HTML diff view:
 
-- Click a code line to add or edit feedback for that exact line.
-- Drag across lines, or click one line and then shift-click another, to comment on a range.
-- Commented lines are highlighted and saved in that browser tab, so refreshes keep your notes.
-- Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent.
+- Click a **line number** (gutter) to add or edit feedback for that line. The code column stays selectable so you can still copy snippets.
+- Drag across line numbers, or click one and then shift-click another, to comment on a range.
+- Use **Delete** in the panel to remove a comment; clearing the textarea no longer deletes silently.
+- Commented lines are highlighted and stored in `localStorage` under a key derived from the repo path + diff args, so rerunning the same `gdiff` invocation restores your notes.
+- Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent. If the browser blocks the clipboard API (common on `file://`), a fallback modal lets you copy manually.
 
 ## Use it from Soloterm
 
