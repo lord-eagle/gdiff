@@ -52,7 +52,7 @@ In the HTML diff view:
 - Drag across line numbers, or click one and then shift-click another, to comment on a range.
 - Use **Delete** in the panel to remove a comment; clearing the textarea no longer deletes silently.
 - Commented lines are highlighted and stored in `localStorage` under a key derived from the repo path + diff args, so rerunning the same `gdiff` invocation restores your notes.
-- Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent. If the browser blocks the clipboard API (common on `file://`), a fallback modal lets you copy manually.
+- Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent. Each comment carries its enclosing `@@ ... @@` hunk header and a few lines of context (the commented line is prefixed with `> `), so closing braces, blank lines, and other ambiguous targets stay actionable. If the browser blocks the clipboard API (common on `file://`), a fallback modal lets you copy manually.
 
 ## Use it from Soloterm
 
