@@ -44,6 +44,15 @@ ln -s "$PWD/gdiff/bin/gdiff" ~/.local/bin/gdiff
 - Pipes the unified diff into `diff2html-cli` via `npx --yes` — no global npm install.
 - Writes a self-contained HTML file to a temp dir and opens it in your default browser.
 
+## Review comments
+
+In the HTML diff view:
+
+- Click a code line to add or edit feedback for that exact line.
+- Drag across lines, or click one line and then shift-click another, to comment on a range.
+- Commented lines are highlighted and saved in that browser tab, so refreshes keep your notes.
+- Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent.
+
 ## Use it from Soloterm
 
 Soloterm has no global config, so you wire `gdiff` per project. Two paths:
