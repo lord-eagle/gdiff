@@ -228,6 +228,91 @@ EOF
     color: #57606a;
     font-size: 12px;
   }
+  .gdiff-count-button {
+    background: transparent;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    font: inherit;
+    padding: 4px 8px;
+    border-radius: 6px;
+  }
+  .gdiff-count-button:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+  .gdiff-comment-list {
+    position: fixed;
+    right: 16px;
+    bottom: 72px;
+    z-index: 21;
+    width: min(420px, calc(100vw - 32px));
+    max-height: 60vh;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    color: #24292f;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+    font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .gdiff-comment-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid #d0d7de;
+  }
+  .gdiff-comment-list-body {
+    padding: 8px;
+    overflow-y: auto;
+  }
+  .gdiff-comment-list-empty {
+    color: #57606a;
+    padding: 8px;
+    margin: 0;
+  }
+  .gdiff-comment-row {
+    padding: 8px;
+    border-radius: 6px;
+  }
+  .gdiff-comment-row + .gdiff-comment-row {
+    margin-top: 6px;
+    border-top: 1px solid #eaeef2;
+    padding-top: 8px;
+  }
+  .gdiff-comment-orphan {
+    background: #fff8c5;
+  }
+  .gdiff-comment-row-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .gdiff-comment-row-target {
+    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #57606a;
+    overflow-wrap: anywhere;
+  }
+  .gdiff-orphan-badge {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    background: #fff8c5;
+    color: #9a6700;
+    border: 1px solid #d4a72c;
+  }
+  .gdiff-comment-row-feedback {
+    margin: 6px 0 8px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .gdiff-comment-row-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
   @media (prefers-color-scheme: dark) {
     .gdiff-review-panel {
       border-color: #30363d;
@@ -256,6 +341,29 @@ EOF
     .gdiff-copy-hint {
       color: #8b949e;
     }
+    .gdiff-comment-list {
+      background: #161b22;
+      color: #e6edf3;
+      border-color: #30363d;
+    }
+    .gdiff-comment-list-header {
+      border-color: #30363d;
+    }
+    .gdiff-comment-list-empty,
+    .gdiff-comment-row-target {
+      color: #8b949e;
+    }
+    .gdiff-comment-row + .gdiff-comment-row {
+      border-top-color: #30363d;
+    }
+    .gdiff-comment-orphan {
+      background: rgba(210, 153, 34, 0.18);
+    }
+    .gdiff-orphan-badge {
+      background: rgba(210, 153, 34, 0.25);
+      color: #d29922;
+      border-color: rgba(210, 153, 34, 0.45);
+    }
   }
 </style>
 <script>
@@ -269,6 +377,30 @@ EOF
   var isDragging = false;
   var storageKey = window.__gdiffStorageKey ||
     ("gdiff-review-comments:" + location.pathname);
+
+  function escHtml(value) {
+    return String(value).replace(/[<>&'"]/g, function (char) {
+      return {
+        "<": "&lt;",
+        ">": "&gt;",
+        "&": "&amp;",
+        "'": "&apos;",
+        "\"": "&quot;"
+      }[char];
+    });
+  }
+
+  function truncate(s, n) {
+    var str = String(s == null ? "" : s);
+    return str.length > n ? str.slice(0, n - 1) + "…" : str;
+  }
+
+  function commentLabel(c) {
+    var startLine = c.startLine || c.line;
+    var endLine = c.endLine || c.line;
+    var range = startLine === endLine ? String(startLine) : startLine + "–" + endLine;
+    return c.file + ":" + range + " (" + c.side + ")";
+  }
 
   function text(node) {
     return (node && node.textContent ? node.textContent : "").replace(/\u00a0/g, " ").trim();
@@ -322,7 +454,7 @@ EOF
   }
 
   function targetFromEvent(event) {
-    if (event.target.closest(".gdiff-review-panel, .gdiff-review-bar, .gdiff-copy-modal")) return null;
+    if (event.target.closest(".gdiff-review-panel, .gdiff-review-bar, .gdiff-copy-modal, .gdiff-comment-list")) return null;
     // Restrict comment selection to the line-number gutter so users can still
     // text-select code in the diff body without triggering the editor.
     if (!event.target.closest(".d2h-code-side-linenumber, .d2h-code-linenumber")) return null;
@@ -543,6 +675,7 @@ EOF
     });
     saveComments();
     refreshMarkers();
+    renderCommentList();
     closePanel();
   }
 
@@ -551,7 +684,112 @@ EOF
     comments.delete(currentSelection.id);
     saveComments();
     refreshMarkers();
+    renderCommentList();
     closePanel();
+  }
+
+  var CONTEXT_LINES = 3;
+
+  function isHunkRow(row) {
+    return !!(row && row.querySelector("td.d2h-info"));
+  }
+
+  function mirrorPaneRow(row) {
+    var sidePane = row && row.closest(".d2h-file-side-diff");
+    if (!sidePane || !sidePane.parentElement) return null;
+    var panes = sidePane.parentElement.querySelectorAll(".d2h-file-side-diff");
+    var other = panes[0] === sidePane ? panes[1] : panes[0];
+    if (!other) return null;
+    var otherBody = other.querySelector("tbody.d2h-diff-tbody");
+    if (!otherBody) return null;
+    var rows = visualRows(row.parentElement);
+    var idx = rows.indexOf(row);
+    if (idx < 0) return null;
+    var otherRows = visualRows(otherBody);
+    return otherRows[idx] || null;
+  }
+
+  function readHunkText(row) {
+    if (!row) return "";
+    var node = row.querySelector("td.d2h-info .d2h-code-side-line, td.d2h-info .d2h-code-line");
+    if (!node) return "";
+    return node.textContent.replace(/ /g, " ").trim();
+  }
+
+  function hunkTextFromRow(row) {
+    var txt = readHunkText(row);
+    if (txt) return txt;
+    return readHunkText(mirrorPaneRow(row));
+  }
+
+  function findHunkRowAbove(row) {
+    var cursor = row && row.previousElementSibling;
+    while (cursor) {
+      if (isHunkRow(cursor)) return cursor;
+      cursor = cursor.previousElementSibling;
+    }
+    return null;
+  }
+
+  function findGutterCell(file, side, line) {
+    var cells = document.querySelectorAll(".d2h-code-side-linenumber, .d2h-code-linenumber");
+    for (var i = 0; i < cells.length; i++) {
+      var target = targetFromRow(cells[i].closest("tr"));
+      if (target && target.file === file && target.side === side && target.line === line) {
+        return cells[i];
+      }
+    }
+    return null;
+  }
+
+  function rowsForComment(comment) {
+    var startLine = comment.startLine || comment.line;
+    var endLine = comment.endLine || comment.line;
+    var rows = [];
+    for (var ln = startLine; ln <= endLine; ln++) {
+      var cell = findGutterCell(comment.file, comment.side, ln);
+      if (cell) rows.push({ line: ln, row: cell.closest("tr") });
+    }
+    return rows;
+  }
+
+  function collectContextRows(firstRow, lastRow, n) {
+    if (!firstRow || !lastRow) return { before: [], after: [] };
+    var siblings = visualRows(firstRow.parentElement);
+    var firstIdx = siblings.indexOf(firstRow);
+    var lastIdx = siblings.indexOf(lastRow);
+    var before = [];
+    for (var i = firstIdx - 1; i >= 0 && before.length < n; i--) {
+      if (isHunkRow(siblings[i])) break;
+      var tb = targetFromRow(siblings[i]);
+      if (!tb) break;
+      before.unshift({ line: tb.line, code: tb.code });
+    }
+    var after = [];
+    for (var j = lastIdx + 1; j < siblings.length && after.length < n; j++) {
+      if (isHunkRow(siblings[j])) break;
+      var ta = targetFromRow(siblings[j]);
+      if (!ta) break;
+      after.push({ line: ta.line, code: ta.code });
+    }
+    return { before: before, after: after };
+  }
+
+  function renderContextBlock(before, commented, after, xml) {
+    var all = [];
+    before.forEach(function (e) { all.push({ line: e.line, code: e.code, marker: false }); });
+    commented.forEach(function (e) { all.push({ line: e.line, code: e.code, marker: true }); });
+    after.forEach(function (e) { all.push({ line: e.line, code: e.code, marker: false }); });
+    if (!all.length) return "";
+    var maxLineNo = all.reduce(function (acc, e) { return e.line > acc ? e.line : acc; }, 0);
+    var width = String(maxLineNo).length;
+    // Per-cell xml-escape so the leading "> " marker stays literal and the
+    // context block can be embedded directly in <context>...</context>.
+    return all.map(function (e) {
+      var num = String(e.line);
+      while (num.length < width) num = " " + num;
+      return (e.marker ? "> " : "  ") + num + "  " + xml(e.code);
+    }).join("\n");
   }
 
   function buildPrompt() {
@@ -577,13 +815,31 @@ EOF
       "",
       "Return a concise summary of the changes you made and call out any feedback you could not apply.",
       "",
+      "Each <context> block shows the commented line(s) prefixed with '> ' and up to " + CONTEXT_LINES + " surrounding lines on each side from the same hunk.",
+      "",
       "<review_feedback>"
     ];
     list.forEach(function (comment, index) {
+      var commentRows = rowsForComment(comment);
+      var firstRow = commentRows.length ? commentRows[0].row : null;
+      var lastRow = commentRows.length ? commentRows[commentRows.length - 1].row : null;
+      var hunk = hunkTextFromRow(findHunkRowAbove(firstRow));
+      var ctx = collectContextRows(firstRow, lastRow, CONTEXT_LINES);
+      var commented = commentRows.map(function (cr) {
+        var t = targetFromRow(cr.row);
+        return t ? { line: t.line, code: t.code } : { line: cr.line, code: "" };
+      });
+      var contextBlock = renderContextBlock(ctx.before, commented, ctx.after, xml);
       lines.push("  <comment index=\"" + (index + 1) + "\">");
       lines.push("    <file>" + xml(comment.file) + "</file>");
       lines.push("    <lines side=\"" + xml(comment.side) + "\" kind=\"" + xml(comment.kind) + "\" start=\"" + xml(comment.startLine || comment.line) + "\" end=\"" + xml(comment.endLine || comment.line) + "\" />");
+      if (hunk) lines.push("    <hunk>" + xml(hunk) + "</hunk>");
       lines.push("    <code>" + xml(comment.code) + "</code>");
+      if (contextBlock) {
+        lines.push("    <context>");
+        lines.push(contextBlock);
+        lines.push("    </context>");
+      }
       lines.push("    <feedback>" + xml(comment.comment) + "</feedback>");
       lines.push("  </comment>");
     });
@@ -644,18 +900,133 @@ EOF
     saveComments();
     refreshMarkers();
     closePanel();
+    closeCommentList();
+  }
+
+  function buildSelectionFromComment(comment) {
+    var startLine = comment.startLine || comment.line;
+    var endLine = comment.endLine || comment.line;
+    var rows = [];
+    var cells = [];
+    for (var ln = startLine; ln <= endLine; ln++) {
+      var cell = findGutterCell(comment.file, comment.side, ln);
+      if (!cell) return null;
+      rows.push(cell.closest("tr"));
+      cells.push(cell);
+    }
+    if (!rows.length) return null;
+    return {
+      id: comment.id,
+      file: comment.file,
+      side: comment.side,
+      startLine: startLine,
+      endLine: endLine,
+      kind: comment.kind,
+      code: comment.code,
+      rows: rows,
+      cells: cells,
+      tableBody: rows[0].parentElement,
+      sidePane: rows[0].closest(".d2h-file-side-diff"),
+      rowIndex: visualRows(rows[0].parentElement).indexOf(rows[rows.length - 1])
+    };
+  }
+
+  function renderCommentList() {
+    var panel = document.getElementById("gdiff-comment-list");
+    if (!panel) return;
+    var body = panel.querySelector(".gdiff-comment-list-body");
+    var list = Array.from(comments.values()).sort(function (a, b) {
+      return a.file.localeCompare(b.file) ||
+        (a.startLine || a.line) - (b.startLine || b.line) ||
+        a.side.localeCompare(b.side);
+    });
+    if (!list.length) {
+      body.innerHTML = '<p class="gdiff-comment-list-empty">No comments stored.</p>';
+      return;
+    }
+    body.innerHTML = list.map(function (c) {
+      var anchored = !!findGutterCell(c.file, c.side, c.startLine || c.line);
+      return '<div class="gdiff-comment-row' + (anchored ? "" : " gdiff-comment-orphan") +
+        '" data-id="' + escHtml(c.id) + '">' +
+        '<div class="gdiff-comment-row-head">' +
+          '<span class="gdiff-comment-row-target">' + escHtml(commentLabel(c)) + '</span>' +
+          (anchored ? '' : '<span class="gdiff-orphan-badge">not in current diff</span>') +
+        '</div>' +
+        '<p class="gdiff-comment-row-feedback">' + escHtml(truncate(c.comment, 240)) + '</p>' +
+        '<div class="gdiff-comment-row-actions">' +
+          (anchored ? '<button type="button" data-act="open">Edit</button>' : '') +
+          '<button type="button" class="gdiff-review-delete" data-act="del">Delete</button>' +
+        '</div>' +
+      '</div>';
+    }).join("");
+    Array.prototype.slice.call(body.querySelectorAll(".gdiff-comment-row")).forEach(function (rowEl) {
+      var id = rowEl.getAttribute("data-id");
+      var delBtn = rowEl.querySelector('[data-act="del"]');
+      if (delBtn) delBtn.addEventListener("click", function () {
+        comments.delete(id);
+        saveComments();
+        refreshMarkers();
+        renderCommentList();
+      });
+      var openBtn = rowEl.querySelector('[data-act="open"]');
+      if (openBtn) openBtn.addEventListener("click", function () {
+        var comment = comments.get(id);
+        if (!comment) return;
+        var sel = buildSelectionFromComment(comment);
+        if (!sel) return;
+        closeCommentList();
+        sel.rows[0].scrollIntoView({ block: "center", behavior: "smooth" });
+        openPanel(sel);
+      });
+    });
+  }
+
+  function openCommentList() {
+    var existing = document.getElementById("gdiff-comment-list");
+    if (existing) { closeCommentList(); return; }
+    var panel = document.createElement("div");
+    panel.id = "gdiff-comment-list";
+    panel.className = "gdiff-comment-list";
+    panel.innerHTML = '<div class="gdiff-comment-list-header">' +
+      '<strong>Comments</strong>' +
+      '<button type="button" data-act="close">Close</button>' +
+      '</div>' +
+      '<div class="gdiff-comment-list-body"></div>';
+    panel.querySelector('[data-act="close"]').addEventListener("click", closeCommentList);
+    function onKey(event) { if (event.key === "Escape") closeCommentList(); }
+    function onDoc(event) {
+      if (panel.contains(event.target)) return;
+      if (event.target.closest(".gdiff-review-bar")) return;
+      closeCommentList();
+    }
+    panel.__cleanup = function () {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDoc, true);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDoc, true);
+    document.body.appendChild(panel);
+    renderCommentList();
+  }
+
+  function closeCommentList() {
+    var panel = document.getElementById("gdiff-comment-list");
+    if (!panel) return;
+    if (panel.__cleanup) panel.__cleanup();
+    panel.remove();
   }
 
   function addUi() {
     var bar = document.createElement("div");
     bar.className = "gdiff-review-bar";
     bar.innerHTML = [
-      '<span><span id="gdiff-review-count">0</span> comments</span>',
+      '<button type="button" id="gdiff-show-comments" class="gdiff-count-button" title="Show all stored comments"><span id="gdiff-review-count">0</span> comments</button>',
       '<button type="button" id="gdiff-copy-comments" class="gdiff-primary">Copy prompt</button>',
       '<button type="button" id="gdiff-clear-comments">Clear</button>'
     ].join("");
     document.body.appendChild(bar);
 
+    document.getElementById("gdiff-show-comments").addEventListener("click", openCommentList);
     document.getElementById("gdiff-copy-comments").addEventListener("click", copyComments);
     document.getElementById("gdiff-clear-comments").addEventListener("click", clearComments);
   }
