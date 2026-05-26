@@ -599,7 +599,7 @@ EOF
     setTimeout(function () { button.textContent = label; }, 1200);
   }
 
-  function openCopyFallbackModal(text) {
+  function openCopyFallbackModal(content) {
     var existing = document.getElementById("gdiff-copy-modal");
     if (existing) existing.remove();
     var modal = document.createElement("div");
@@ -614,13 +614,14 @@ EOF
       '</div>' +
       '</section>';
     var textarea = modal.querySelector("textarea");
-    textarea.value = text;
-    modal.querySelector('[data-action="close"]').addEventListener("click", function () {
-      modal.remove();
-    });
+    textarea.value = content;
+    function close() { modal.remove(); document.removeEventListener("keydown", onKeydown); }
+    function onKeydown(event) { if (event.key === "Escape") close(); }
+    modal.querySelector('[data-action="close"]').addEventListener("click", close);
     modal.addEventListener("click", function (event) {
-      if (event.target === modal) modal.remove();
+      if (event.target === modal) close();
     });
+    document.addEventListener("keydown", onKeydown);
     document.body.appendChild(modal);
     textarea.focus();
     textarea.select();
@@ -696,7 +697,7 @@ EOF
 EOF
 }
 
-printf '%s' "$diff_text" | npx --yes diff2html-cli@^5.2 \
+printf '%s' "$diff_text" | npx --yes 'diff2html-cli@^5.2' \
   --style side \
   --highlightCode true \
   --summary closed \
