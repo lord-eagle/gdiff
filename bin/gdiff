@@ -1,18 +1,11 @@
 #!/usr/bin/env bash
-# gdiff — open the current repo's git diff as a side-by-side HTML view in your browser.
-#
-# Usage:
-#   gdiff                # working tree + staged diff vs HEAD
-#   gdiff <ref>          # diff vs <ref> (e.g. gdiff main, gdiff HEAD~3)
-#   gdiff <a> <b>        # diff between two refs
-#   gdiff --unified      # plain colored unified diff in terminal (no browser)
-#   gdiff --help
+# gdiff — open the current repo's git diff as a virtualized side-by-side HTML view in your browser.
 
 set -euo pipefail
 
 print_help() {
   cat <<'EOF'
-gdiff — git diff as a beautiful side-by-side HTML view
+gdiff — git diff as a virtualized side-by-side HTML view
 
 Usage:
   gdiff                  Show working tree + staged changes
@@ -21,7 +14,19 @@ Usage:
   gdiff -u, --unified    Plain colored unified diff in terminal
   gdiff -h, --help       Show this help
 
-Requires: git, node (for npx). On first run npx fetches diff2html-cli (cached after).
+Requires: git. HTML mode loads @pierre/diffs in the browser from esm.sh.
+
+Environment:
+  GDIFF_OPEN=0          Skip opening the browser; print the HTML path instead.
+  GDIFF_DIFFS_VERSION   @pierre/diffs version to load (default: 1.2.7).
+  GDIFF_THEME           Diffs syntax theme name (default: gdiff-atelier, a custom
+                        warm-paper theme; also pierre-light / pierre-dark or any
+                        bundled Shiki theme name).
+  GDIFF_THEME_TYPE      Theme variant: light | dark | system (default: light).
+  GDIFF_TOKEN_HOOKS     Token hover hooks (useTokenTransformer): 0 (default) or 1.
+  GDIFF_ITEM_METRICS    JSON Partial<VirtualFileMetrics> passed to CodeView
+                        itemMetrics for file-diff size estimation. Default: null.
+                        See Diffs docs > CodeView file diff size estimation.
 EOF
 }
 
@@ -42,13 +47,31 @@ fi
 
 collect_diff() {
   local color_flag="${1:-never}"
+  local context_lines="${2:-}"
+  local context_arg=""
+  if [ -n "$context_lines" ]; then
+    context_arg="--unified=$context_lines"
+  fi
   if [ "${#args[@]}" -eq 0 ]; then
-    git --no-pager diff "--color=$color_flag"
-    git --no-pager diff --cached "--color=$color_flag"
+    if [ -n "$context_arg" ]; then
+      git --no-pager diff "--color=$color_flag" "$context_arg"
+      git --no-pager diff --cached "--color=$color_flag" "$context_arg"
+    else
+      git --no-pager diff "--color=$color_flag"
+      git --no-pager diff --cached "--color=$color_flag"
+    fi
   elif [ "${#args[@]}" -eq 1 ]; then
-    git --no-pager diff "--color=$color_flag" "${args[0]}"
+    if [ -n "$context_arg" ]; then
+      git --no-pager diff "--color=$color_flag" "$context_arg" "${args[0]}"
+    else
+      git --no-pager diff "--color=$color_flag" "${args[0]}"
+    fi
   else
-    git --no-pager diff "--color=$color_flag" "${args[0]}" "${args[1]}"
+    if [ -n "$context_arg" ]; then
+      git --no-pager diff "--color=$color_flag" "$context_arg" "${args[0]}" "${args[1]}"
+    else
+      git --no-pager diff "--color=$color_flag" "${args[0]}" "${args[1]}"
+    fi
   fi
 }
 
@@ -57,535 +80,1714 @@ if [ "$mode" = "unified" ]; then
   exit 0
 fi
 
-if ! command -v npx >/dev/null 2>&1; then
-  echo "gdiff: 'npx' not found. Install Node.js (https://nodejs.org) or run with --unified." >&2
-  exit 1
-fi
-
 tmp_dir="$(mktemp -d -t gdiff.XXXXXX)"
 out="$tmp_dir/diff.html"
+patch_file="$tmp_dir/diff.patch"
+patch_more_file="$tmp_dir/diff.more.patch"
+patch_full_file="$tmp_dir/diff.full.patch"
+trap 'rm -f "$patch_file" "$patch_more_file" "$patch_full_file"' EXIT
 
-diff_text="$(collect_diff never)"
-if [ -z "$diff_text" ]; then
+collect_diff never >"$patch_file"
+if [ ! -s "$patch_file" ]; then
   echo "gdiff: no changes to show."
   exit 0
 fi
+collect_diff never 20 >"$patch_more_file"
+collect_diff never 999999 >"$patch_full_file"
 
 repo_root="$(git rev-parse --show-toplevel)"
 repo_name="$(basename "$repo_root")"
 title="gdiff — $repo_name"
+patch_bytes="$(wc -c <"$patch_file" | tr -d '[:space:]')"
 
-add_review_tools() {
-  cat >>"$out" <<'EOF'
+collect_numstat() {
+  if [ "${#args[@]}" -eq 0 ]; then
+    git --no-pager diff --numstat
+    git --no-pager diff --cached --numstat
+  elif [ "${#args[@]}" -eq 1 ]; then
+    git --no-pager diff --numstat "${args[0]}"
+  else
+    git --no-pager diff --numstat "${args[0]}" "${args[1]}"
+  fi
+}
+read -r total_add total_del < <(collect_numstat | awk '
+  { if ($1 ~ /^[0-9]+$/) add += $1; if ($2 ~ /^[0-9]+$/) del += $2 }
+  END { printf "%d %d\n", add, del }
+')
+diffs_version="${GDIFF_DIFFS_VERSION:-1.2.7}"
+diffs_theme="${GDIFF_THEME:-gdiff-atelier}"
+diffs_theme_type="${GDIFF_THEME_TYPE:-light}"
+token_hooks="${GDIFF_TOKEN_HOOKS:-0}"
+item_metrics="${GDIFF_ITEM_METRICS:-null}"
+
+cat >"$out" <<EOF
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>$title</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500&display=swap" rel="stylesheet">
 <style>
-  .gdiff-review-bar {
+  /* gdiff "Atelier" — warm paper, ink, jewel-tone accents. Light by design;
+     the diff itself is themed by the matching custom Shiki theme (gdiff-atelier). */
+  :root {
+    color-scheme: light;
+    --bg: #f7f4ec;
+    --bg-inset: #efe9db;
+    --fg: #2c2823;
+    --muted: #8c8475;
+    --border: #e2dac9;
+    --border-muted: #ebe4d4;
+    --panel: #f1ebdd;
+    --panel-hover: #e8e0cf;
+    --primary: #4d7c0f;
+    --primary-hover: #3f6212;
+    --accent-fg: #0e7c6b;
+    --accent-emphasis: #0b6557;
+    --accent-subtle: rgba(14, 124, 107, 0.12);
+    --accent-warm: #b45309;
+    --success-fg: #4d7c0f;
+    --danger-fg: #a8324a;
+    --attention-fg: #b45309;
+    --attention-bg: #f6ead2;
+    --diff-add-bg: #e9f1d8;
+    --diff-del-bg: #f6e2e4;
+    --shadow: rgba(60, 50, 35, 0.12);
+    --overlay-shadow: 0 12px 32px rgba(60, 50, 35, 0.14), 0 1px 2px rgba(60, 50, 35, 0.10);
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --display: "Fraunces", Georgia, "Times New Roman", serif;
+    --radius: 7px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background-color: var(--bg);
+    background-image:
+      radial-gradient(1200px 620px at 100% -8%, rgba(180, 83, 9, 0.05), transparent 60%),
+      radial-gradient(960px 520px at -10% 112%, rgba(14, 124, 107, 0.06), transparent 55%);
+    background-attachment: fixed;
+    color: var(--fg);
+    font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    animation: gdiffFade 0.45s ease both;
+  }
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 21;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 52px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .top-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .title { display: flex; align-items: baseline; gap: 9px; min-width: 0; overflow: hidden; white-space: nowrap; }
+  .title .wordmark {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 20px;
+    letter-spacing: 0.2px;
+    color: var(--fg);
+    position: relative;
+  }
+  .title .wordmark::after {
+    content: "";
+    position: absolute;
+    right: -5px;
+    bottom: 3px;
+    width: 5px;
+    height: 5px;
+    border-radius: 999px;
+    background: var(--accent-warm);
+  }
+  .title .title-repo {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--muted);
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+  .top-actions { display: flex; gap: 12px; align-items: center; }
+  .stats { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .stats .stat-add { color: var(--success-fg); font-weight: 600; }
+  .stats .stat-del { color: var(--danger-fg); font-weight: 600; margin-inline-start: 6px; }
+  .stats .stat-files { margin-inline-end: 8px; }
+  .view-toggle {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+  }
+  .view-toggle button {
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+  .view-toggle button[aria-pressed="true"] {
+    background: var(--bg);
+    box-shadow: 0 1px 3px var(--shadow);
+  }
+  .app-shell {
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr);
+    min-height: calc(100vh - 52px);
+  }
+  .app-shell.is-sidebar-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+  .file-tree {
+    position: sticky;
+    top: 52px;
+    z-index: 20;
+    height: calc(100vh - 52px);
+    overflow: auto;
+    border-right: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .app-shell.is-sidebar-collapsed .file-tree {
+    overflow: hidden;
+    border-right: 0;
+  }
+  .file-tree-title {
+    position: sticky;
+    top: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+    font-family: var(--display);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+  }
+  .sidebar-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 26px;
+    padding: 0;
+  }
+  #sidebar-toggle-top { display: none; }
+  body.is-sidebar-collapsed #sidebar-toggle-top { display: inline-flex; }
+  .sidebar-toggle svg { width: 16px; height: 16px; }
+  .file-tree-search {
+    position: sticky;
+    top: 37px;
+    z-index: 1;
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .file-tree-search input {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+  }
+  .file-tree-list {
+    display: flex;
+    flex-direction: column;
+    padding: 6px;
+  }
+  .file-tree-folder,
+  .file-tree-item {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--fg);
+    border-radius: var(--radius);
+    overflow: hidden;
+    padding: 5px 8px;
+    font: 12px var(--mono);
+    text-overflow: ellipsis;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .file-tree-folder {
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .file-tree-folder::before {
+    content: "▾";
+    width: 12px;
+    color: var(--muted);
+  }
+  .file-tree-folder.is-collapsed::before { content: "▸"; }
+  .file-tree-item:hover,
+  .file-tree-folder:hover { background: var(--panel-hover); }
+  .file-tree-item.is-active {
+    background: var(--accent-subtle);
+    box-shadow: inset 3px 0 0 var(--accent-emphasis);
+    color: var(--accent-emphasis);
+  }
+  .file-tree-item.is-viewed { opacity: 0.62; }
+  .file-tree-item.is-viewed .file-tree-file { text-decoration: line-through; }
+  .file-tree-status {
+    flex: none;
+    width: 14px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--muted);
+  }
+  .file-tree-status.s-add { color: var(--success-fg); }
+  .file-tree-status.s-del { color: var(--danger-fg); }
+  .file-tree-status.s-mod { color: var(--attention-fg); }
+  .file-tree-file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .file-tree-stat { flex: none; font-size: 11px; font-weight: 600; }
+  .file-tree-stat.is-add { color: var(--success-fg); }
+  .file-tree-stat.is-del { color: var(--danger-fg); margin-inline-start: 4px; }
+  .file-tree-count { margin-left: auto; color: var(--muted); font-size: 12px; }
+  .file-tree-empty { padding: 10px 8px; color: var(--muted); font-size: 12px; }
+  #viewer { min-width: 0; min-height: calc(100vh - 52px); }
+  @media (max-width: 900px) {
+    .app-shell { grid-template-columns: 1fr; }
+    .file-tree { position: static; height: auto; max-height: 220px; border-right: 0; border-bottom: 1px solid var(--border); }
+  }
+  .review-bar {
     position: fixed;
     right: 16px;
     bottom: 16px;
-    z-index: 20;
+    z-index: 30;
     display: flex;
-    gap: 8px;
+    gap: 10px;
     align-items: center;
-    padding: 8px;
-    background: #24292f;
-    border-radius: 6px;
-    box-shadow: 0 8px 24px rgba(140, 149, 159, 0.35);
-    color: #fff;
-    font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 8px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--overlay-shadow);
+    color: var(--fg);
+    font-size: 13px;
   }
-  .gdiff-review-bar button,
-  .gdiff-review-panel button {
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
-    background: #f6f8fa;
-    color: #24292f;
+  .review-bar .review-count-label { color: var(--muted); }
+  .review-bar #review-count { font-weight: 600; color: var(--fg); }
+  button {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    color: var(--fg);
     cursor: pointer;
     font: inherit;
     padding: 6px 10px;
+    transition: background .12s ease, border-color .12s ease, color .12s ease;
   }
-  .gdiff-review-bar button:hover,
-  .gdiff-review-panel button:hover {
-    background: #eef1f4;
-  }
-  .gdiff-review-bar .gdiff-primary,
-  .gdiff-review-panel .gdiff-primary {
-    border-color: #1f883d;
-    background: #1f883d;
-    color: #fff;
-  }
-  .gdiff-review-bar .gdiff-primary:hover,
-  .gdiff-review-panel .gdiff-primary:hover {
-    background: #1a7f37;
-  }
-  .gdiff-review-panel {
-    width: min(720px, calc((100vw - 80px) / 2));
-    max-width: calc(100vw - 80px);
-    box-sizing: border-box;
+  button:hover:not(.primary):not(:disabled) { background: var(--panel-hover); }
+  button.primary { border-color: var(--primary); background: var(--primary); color: #fff; }
+  button.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+  #clear-comments { border-color: transparent; background: transparent; color: var(--muted); padding: 6px 8px; }
+  #clear-comments:hover { background: transparent; color: var(--danger-fg); }
+  .review-panel {
+    width: min(720px, 100%);
+    max-width: 100%;
     padding: 12px;
-    border: 1px solid #d0d7de;
+    border: 1px solid var(--border);
     border-radius: 6px;
-    background: #fff;
-    color: #24292f;
-    font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    box-shadow: 0 4px 16px var(--shadow);
   }
-  .gdiff-review-editor-row > td {
-    padding: 8px 12px;
-    background: #f6f8fa;
-    vertical-align: top;
+  .review-panel.is-file-comment {
+    position: fixed;
+    right: 16px;
+    bottom: 68px;
+    z-index: 31;
   }
-  .gdiff-review-spacer-row > td {
-    padding: 0;
-    border: 0;
-  }
-  .gdiff-review-target {
-    margin: 0 0 8px;
-    color: #57606a;
-    overflow-wrap: anywhere;
-  }
-  .gdiff-review-code {
+  .review-target { margin: 0 0 8px; color: var(--muted); overflow-wrap: anywhere; }
+  .review-code {
     margin: 0 0 8px;
     max-height: 110px;
     overflow: auto;
     padding: 8px;
     border-radius: 6px;
-    background: #f6f8fa;
-    color: #24292f;
+    background: var(--panel);
     font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     white-space: pre-wrap;
   }
-  .gdiff-review-panel textarea {
+  textarea {
     width: 100%;
     min-height: 110px;
-    box-sizing: border-box;
     resize: vertical;
     margin: 0 0 8px;
     padding: 8px;
-    border: 1px solid #d0d7de;
+    border: 1px solid var(--border);
     border-radius: 6px;
-    color: #24292f;
+    background: var(--bg);
+    color: var(--fg);
     font: inherit;
   }
-  .gdiff-review-actions {
-    display: flex;
+  .review-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .gdiff-annotation {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-inline-start: 6px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: var(--accent-subtle);
+    color: var(--accent-fg);
+    font: 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .gdiff-header-actions {
+    display: inline-flex;
     gap: 8px;
-    justify-content: flex-end;
+    align-items: center;
+    margin-inline-start: 8px;
   }
-  .gdiff-selected-line > td {
-    background: #ddf4ff !important;
-    box-shadow: inset 3px 0 #0969da;
+  .gdiff-header-actions label {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    color: var(--muted);
+    font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    cursor: pointer;
   }
-  .gdiff-commented-line {
-    background: #fff8c5 !important;
+  .gdiff-comment-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 26px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--muted);
   }
-  .gdiff-commented-line::after {
-    content: " comment";
-    color: #9a6700;
-    direction: ltr;
-    font-size: 11px;
+  .gdiff-comment-button:hover { background: var(--accent-subtle); color: var(--accent-fg); }
+  .gdiff-comment-button span {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    display: none;
+    min-width: 16px;
+    height: 16px;
+    place-items: center;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--accent-emphasis);
+    color: #fff;
+    font-size: 10px;
+    line-height: 1;
   }
-  @media (prefers-color-scheme: dark) {
-    .gdiff-review-panel {
-      border-color: #30363d;
-      background: #161b22;
-      color: #e6edf3;
-    }
-    .gdiff-review-editor-row > td {
-      background: #0d1117;
-    }
-    .gdiff-review-target {
-      color: #8b949e;
-    }
-    .gdiff-review-code,
-    .gdiff-review-panel textarea {
-      border-color: #30363d;
-      background: #0d1117;
-      color: #e6edf3;
-    }
-    .gdiff-commented-line {
-      background: rgba(210, 153, 34, 0.25) !important;
-    }
-    .gdiff-selected-line > td {
-      background: rgba(56, 139, 253, 0.18) !important;
-    }
+  .gdiff-comment-button[data-count]:not([data-count="0"]) { color: var(--accent-fg); }
+  .gdiff-comment-button[data-count]:not([data-count="0"]) span { display: grid; }
+  .gdiff-expand-hunk {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 18px;
+    margin-inline: 0 8px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--accent-fg);
+    padding: 0;
+    line-height: 1;
+  }
+  .gdiff-expand-hunk:hover:not([disabled]) { background: var(--accent-subtle); }
+  .gdiff-expand-hunk span { display: none; }
+  .gdiff-expand-hunk[disabled] {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .gdiff-token-tip {
+    position: fixed;
+    z-index: 40;
+    display: none;
+    max-width: 320px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    color: var(--fg);
+    box-shadow: var(--overlay-shadow);
+    font: 12px var(--mono);
+    pointer-events: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Motion — restrained: one staggered reveal on load, soft transitions thereafter. */
+  @keyframes gdiffFade { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes rowIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+  @keyframes panelIn { from { opacity: 0; transform: translateY(7px) scale(0.99); } to { opacity: 1; transform: none; } }
+  .file-tree-item { transition: background 0.14s ease, box-shadow 0.16s ease, opacity 0.14s ease; }
+  .file-tree-list.is-initial .file-tree-item,
+  .file-tree-list.is-initial .file-tree-folder { animation: rowIn 0.34s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  .file-tree-list.is-initial .file-tree-item:nth-child(1) { animation-delay: 0.02s; }
+  .file-tree-list.is-initial .file-tree-item:nth-child(2) { animation-delay: 0.05s; }
+  .file-tree-list.is-initial .file-tree-item:nth-child(3) { animation-delay: 0.08s; }
+  .file-tree-list.is-initial .file-tree-item:nth-child(4) { animation-delay: 0.11s; }
+  .file-tree-list.is-initial .file-tree-item:nth-child(5) { animation-delay: 0.14s; }
+  .file-tree-list.is-initial .file-tree-item:nth-child(6) { animation-delay: 0.17s; }
+  .file-tree-list.is-initial .file-tree-item:nth-child(7) { animation-delay: 0.20s; }
+  .file-tree-list.is-initial .file-tree-item:nth-child(n + 8) { animation-delay: 0.23s; }
+  .review-panel, .review-panel.is-file-comment { animation: panelIn 0.18s ease both; }
+  @media (prefers-reduced-motion: reduce) {
+    body, .file-tree-list.is-initial .file-tree-item, .file-tree-list.is-initial .file-tree-folder,
+    .review-panel, .review-panel.is-file-comment { animation: none !important; }
+  }
+  /* Dark sibling — warm "Noir". Toggled at runtime; default stays light. */
+  body.theme-dark {
+    color-scheme: dark;
+    --bg: #161310;
+    --bg-inset: #100d0a;
+    --fg: #ece4d6;
+    --muted: #9a8f7d;
+    --border: #322b22;
+    --border-muted: #2a241c;
+    --panel: #1e1a15;
+    --panel-hover: #272019;
+    --primary: #6f9a3a;
+    --primary-hover: #7faf46;
+    --accent-fg: #5bbfae;
+    --accent-emphasis: #3fa392;
+    --accent-subtle: rgba(91, 191, 174, 0.16);
+    --accent-warm: #e0954a;
+    --success-fg: #8cb35a;
+    --danger-fg: #e06b86;
+    --attention-fg: #e0954a;
+    --attention-bg: #2a2113;
+    --diff-add-bg: #1b2414;
+    --diff-del-bg: #2a1820;
+    --shadow: rgba(0, 0, 0, 0.5);
+    --overlay-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 1px 2px rgba(0, 0, 0, 0.4);
+    background-image:
+      radial-gradient(1200px 620px at 100% -8%, rgba(224, 149, 74, 0.08), transparent 60%),
+      radial-gradient(960px 520px at -10% 112%, rgba(91, 191, 174, 0.08), transparent 55%);
+  }
+  /* Files header: viewed progress + unreviewed-only filter */
+  .tree-meta {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .tree-progress { font-size: 11px; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+  .tree-progress b { color: var(--accent-emphasis); font-weight: 600; }
+  .tree-filter { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap; }
+  .tree-filter input { accent-color: var(--accent-emphasis); margin: 0; }
+  .file-tree-comments {
+    flex: none; display: inline-flex; align-items: center; gap: 2px;
+    font-size: 11px; font-weight: 600; color: var(--accent-fg);
+  }
+  .file-tree-comments svg { width: 11px; height: 11px; }
+  /* Topbar icon buttons (theme toggle, help) */
+  .icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 28px; padding: 0; color: var(--muted); }
+  .icon-btn:hover { color: var(--accent-fg); background: var(--panel-hover); }
+  .icon-btn svg { width: 16px; height: 16px; }
+  .icon-btn .sun { display: none; }
+  body.theme-dark .icon-btn .sun { display: inline; }
+  body.theme-dark .icon-btn .moon { display: none; }
+  /* Keyboard-shortcuts help overlay */
+  .help-overlay {
+    position: fixed; inset: 0; z-index: 50;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(20, 17, 12, 0.45);
+  }
+  .help-overlay.is-open { display: flex; animation: gdiffFade 0.15s ease both; }
+  .help-card {
+    width: min(440px, calc(100vw - 32px));
+    padding: 18px 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+    box-shadow: var(--overlay-shadow);
+    animation: panelIn 0.18s ease both;
+  }
+  .help-card h2 { margin: 0 0 4px; font-family: var(--display); font-size: 19px; font-weight: 600; }
+  .help-card p { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+  .help-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 7px 0; border-top: 1px solid var(--border-muted); }
+  .help-row span { color: var(--fg); font-size: 13px; }
+  .help-row kbd {
+    font-family: var(--mono); font-size: 12px;
+    min-width: 18px; text-align: center;
+    padding: 2px 7px; border: 1px solid var(--border);
+    border-bottom-width: 2px; border-radius: 5px; background: var(--panel); color: var(--fg);
   }
 </style>
-<script>
-(function () {
-  var comments = new Map();
-  var currentSelection = null;
-  var anchorTarget = null;
-  var dragTarget = null;
-  var isDragging = false;
-  var storageKey = "gdiff-review-comments:" + location.pathname;
-
-  function text(node) {
-    return (node && node.textContent ? node.textContent : "").replace(/\u00a0/g, " ").trim();
-  }
-
-  function lineKind(row) {
-    var codeCell = row.querySelector("td:nth-child(2)");
-    if (!codeCell) return "context";
-    if (codeCell.classList.contains("d2h-ins")) return "added";
-    if (codeCell.classList.contains("d2h-del")) return "removed";
-    if (codeCell.classList.contains("d2h-info")) return "hunk";
-    return "context";
-  }
-
-  function fileName(wrapper) {
-    return text(wrapper.querySelector(".d2h-file-header .d2h-file-name")) || "unknown";
-  }
-
-  function lineCode(row) {
-    var code = row.querySelector(".d2h-code-line-ctn");
-    if (!code) return text(row.querySelector(".d2h-code-side-line, .d2h-code-line"));
-    return code.textContent.replace(/\u00a0/g, " ");
-  }
-
-  function targetFromRow(row) {
-    var cell = row && row.querySelector(".d2h-code-side-linenumber, .d2h-code-linenumber");
-    if (!cell) return null;
-    var row = cell.closest("tr");
-    var wrapper = cell.closest(".d2h-file-wrapper");
-    var sideDiff = cell.closest(".d2h-file-side-diff");
-    var line = text(cell);
-    if (!row || !wrapper || !line || !/^\d+$/.test(line)) return null;
-    var side = "new";
-    if (sideDiff) {
-      side = Array.prototype.indexOf.call(sideDiff.parentElement.children, sideDiff) === 0 ? "old" : "new";
-    } else if (cell.querySelector(".line-num1") && !cell.querySelector(".line-num2")) {
-      side = "old";
-    }
-    var file = fileName(wrapper);
-    var kind = lineKind(row);
-    return {
-      id: [file, side, line, kind].join(":"),
-      file: file,
-      side: side,
-      line: Number(line),
-      kind: kind,
-      code: lineCode(row),
-      row: row,
-      cell: cell
-    };
-  }
-
-  function targetFromEvent(event) {
-    if (event.target.closest(".gdiff-review-panel, .gdiff-review-bar")) return null;
-    return targetFromRow(event.target.closest("tr"));
-  }
-
-  function allTargetsInTable(target) {
-    return Array.prototype.slice.call(target.row.parentElement.querySelectorAll("tr"))
-      .map(targetFromRow)
-      .filter(function (candidate) {
-        return candidate &&
-          candidate.file === target.file &&
-          candidate.side === target.side &&
-          candidate.row.parentElement === target.row.parentElement;
-      });
-  }
-
-  function visualRows(tbody) {
-    if (!tbody) return [];
-    return Array.prototype.slice.call(tbody.children).filter(function (row) {
-      return row.id !== "gdiff-review-editor-row" && row.id !== "gdiff-review-spacer-row";
-    });
-  }
-
-  function selectionFromTargets(start, end) {
-    if (!start || !end || start.file !== end.file || start.side !== end.side) return null;
-    if (start.row.parentElement !== end.row.parentElement) return null;
-    var targets = allTargetsInTable(start);
-    var startIndex = targets.findIndex(function (target) { return target.row === start.row; });
-    var endIndex = targets.findIndex(function (target) { return target.row === end.row; });
-    if (startIndex < 0 || endIndex < 0) return null;
-    var selected = targets.slice(Math.min(startIndex, endIndex), Math.max(startIndex, endIndex) + 1);
-    var lines = selected.map(function (target) { return target.line; });
-    var kinds = selected.map(function (target) { return target.kind; });
-    var kind = kinds.every(function (value) { return value === kinds[0]; }) ? kinds[0] : "mixed";
-    var startLine = Math.min.apply(Math, lines);
-    var endLine = Math.max.apply(Math, lines);
-    return {
-      id: [start.file, start.side, startLine + "-" + endLine, kind].join(":"),
-      file: start.file,
-      side: start.side,
-      startLine: startLine,
-      endLine: endLine,
-      kind: kind,
-      code: selected.map(function (target) { return target.code; }).join("\n"),
-      rows: selected.map(function (target) { return target.row; }),
-      cells: selected.map(function (target) { return target.cell; }),
-      tableBody: start.row.parentElement,
-      sidePane: start.row.closest(".d2h-file-side-diff"),
-      rowIndex: visualRows(start.row.parentElement).indexOf(selected[selected.length - 1].row)
-    };
-  }
-
-  function loadComments() {
-    try {
-      JSON.parse(localStorage.getItem(storageKey) || "[]").forEach(function (comment) {
-        if (comment.side !== "old" && comment.side !== "new") return;
-        if (!/^(added|removed|context|hunk|mixed)$/.test(comment.kind)) comment.kind = "mixed";
-        if (!comment.startLine) comment.startLine = comment.line;
-        if (!comment.endLine) comment.endLine = comment.line;
-        comment.id = [comment.file, comment.side, comment.startLine + "-" + comment.endLine, comment.kind].join(":");
-        comments.set(comment.id, comment);
-      });
-    } catch (error) {
-      comments.clear();
-    }
-  }
-
-  function saveComments() {
-    localStorage.setItem(storageKey, JSON.stringify(Array.from(comments.values())));
-  }
-
-  function refreshMarkers() {
-    document.querySelectorAll(".gdiff-commented-line").forEach(function (cell) {
-      cell.classList.remove("gdiff-commented-line");
-      cell.removeAttribute("data-gdiff-comment-id");
-    });
-    comments.forEach(function (comment) {
-      var cells = Array.prototype.slice.call(document.querySelectorAll(".d2h-code-side-linenumber"));
-      cells.forEach(function (cell) {
-        var target = targetFromRow(cell.closest("tr"));
-        var startLine = comment.startLine || comment.line;
-        var endLine = comment.endLine || comment.line;
-        if (!target ||
-          target.file !== comment.file ||
-          target.side !== comment.side ||
-          target.line < startLine ||
-          target.line > endLine) return;
-        cell.classList.add("gdiff-commented-line");
-        cell.setAttribute("data-gdiff-comment-id", comment.id);
-      });
-    });
-    document.getElementById("gdiff-review-count").textContent = String(comments.size);
-  }
-
-  function clearSelection() {
-    document.querySelectorAll(".gdiff-selected-line").forEach(function (row) {
-      row.classList.remove("gdiff-selected-line");
-    });
-  }
-
-  function lineLabel(selection) {
-    return selection.startLine === selection.endLine ? String(selection.startLine) : selection.startLine + "-" + selection.endLine;
-  }
-
-  function ensurePanelRow(selection) {
-    var row = document.getElementById("gdiff-review-editor-row");
-    var spacer = document.getElementById("gdiff-review-spacer-row");
-    if (spacer) spacer.remove();
-    if (!row) {
-      row = document.createElement("tr");
-      row.id = "gdiff-review-editor-row";
-      row.className = "gdiff-review-editor-row";
-      row.innerHTML = '<td colspan="2"><section id="gdiff-review-panel" class="gdiff-review-panel">' +
-        '<p id="gdiff-review-target" class="gdiff-review-target"></p>' +
-        '<pre id="gdiff-review-code" class="gdiff-review-code"></pre>' +
-        '<textarea id="gdiff-review-comment" placeholder="Leave feedback for this line"></textarea>' +
-        '<div class="gdiff-review-actions">' +
-        '  <button type="button" id="gdiff-review-cancel">Cancel</button>' +
-        '  <button type="button" id="gdiff-review-save" class="gdiff-primary">Save comment</button>' +
-        '</div>' +
-        '</section></td>';
-      row.querySelector("#gdiff-review-save").addEventListener("click", saveCurrentComment);
-      row.querySelector("#gdiff-review-cancel").addEventListener("click", closePanel);
-      row.querySelector("#gdiff-review-comment").addEventListener("keydown", function (event) {
-        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") saveCurrentComment();
-        if (event.key === "Escape") closePanel();
-      });
-    }
-    selection.rows[selection.rows.length - 1].after(row);
-    if (selection.sidePane) {
-      row.querySelector(".gdiff-review-panel").style.width = Math.max(180, selection.sidePane.clientWidth - 32) + "px";
-      var panes = Array.prototype.slice.call(selection.sidePane.parentElement.querySelectorAll(".d2h-file-side-diff"));
-      var siblingPane = panes.find(function (pane) { return pane !== selection.sidePane; });
-      var siblingRows = siblingPane ? visualRows(siblingPane.querySelector("tbody.d2h-diff-tbody")) : [];
-      var siblingRow = siblingRows[selection.rowIndex];
-      if (siblingRow) {
-        spacer = document.createElement("tr");
-        spacer.id = "gdiff-review-spacer-row";
-        spacer.className = "gdiff-review-spacer-row";
-        spacer.innerHTML = '<td colspan="2"></td>';
-        siblingRow.after(spacer);
-        spacer.querySelector("td").style.height = row.getBoundingClientRect().height + "px";
-      }
-    }
-    return row;
-  }
-
-  function previewSelection(selection) {
-    if (!selection) return;
-    clearSelection();
-    selection.rows.forEach(function (row) {
-      row.classList.add("gdiff-selected-line");
-    });
-  }
-
-  function openPanel(selection) {
-    currentSelection = selection;
-    previewSelection(selection);
-    ensurePanelRow(selection);
-    document.getElementById("gdiff-review-target").textContent =
-      selection.file + ":" + lineLabel(selection) + " (" + selection.side + ", " + selection.kind + ")";
-    document.getElementById("gdiff-review-code").textContent = selection.code;
-    document.getElementById("gdiff-review-comment").value = (comments.get(selection.id) || {}).comment || "";
-    document.getElementById("gdiff-review-comment").focus();
-  }
-
-  function closePanel() {
-    var row = document.getElementById("gdiff-review-editor-row");
-    var spacer = document.getElementById("gdiff-review-spacer-row");
-    if (row) row.remove();
-    if (spacer) spacer.remove();
-    clearSelection();
-    currentSelection = null;
-  }
-
-  function saveCurrentComment() {
-    if (!currentSelection) return;
-    var value = document.getElementById("gdiff-review-comment").value.trim();
-    if (!value) {
-      comments.delete(currentSelection.id);
-    } else {
-      comments.set(currentSelection.id, {
-        id: currentSelection.id,
-        file: currentSelection.file,
-        side: currentSelection.side,
-        startLine: currentSelection.startLine,
-        endLine: currentSelection.endLine,
-        kind: currentSelection.kind,
-        code: currentSelection.code,
-        comment: value
-      });
-    }
-    saveComments();
-    refreshMarkers();
-    closePanel();
-  }
-
-  function buildPrompt() {
-    var list = Array.from(comments.values()).sort(function (a, b) {
-      return a.file.localeCompare(b.file) || (a.startLine || a.line) - (b.startLine || b.line) || a.side.localeCompare(b.side);
-    });
-    var xml = function (value) {
-      return String(value).replace(/[<>&'"]/g, function (char) {
-        return {
-          "<": "&lt;",
-          ">": "&gt;",
-          "&": "&amp;",
-          "'": "&apos;",
-          "\"": "&quot;"
-        }[char];
-      });
-    };
-    var lines = [
-      "Please address the following line-level review feedback from the git diff.",
-      "",
-      "Before editing, inspect all comments and target locations first so line numbers do not drift while you work.",
-      "Then address the comments one by one.",
-      "",
-      "Return a concise summary of the changes you made and call out any feedback you could not apply.",
-      "",
-      "<review_feedback>"
-    ];
-    list.forEach(function (comment, index) {
-      lines.push("  <comment index=\"" + (index + 1) + "\">");
-      lines.push("    <file>" + xml(comment.file) + "</file>");
-      lines.push("    <lines side=\"" + xml(comment.side) + "\" kind=\"" + xml(comment.kind) + "\" start=\"" + xml(comment.startLine || comment.line) + "\" end=\"" + xml(comment.endLine || comment.line) + "\" />");
-      lines.push("    <code>" + xml(comment.code) + "</code>");
-      lines.push("    <feedback>" + xml(comment.comment) + "</feedback>");
-      lines.push("  </comment>");
-    });
-    lines.push("</review_feedback>");
-    return lines.join("\n");
-  }
-
-  function copyComments() {
-    var prompt = buildPrompt();
-    if (!comments.size) {
-      prompt = "No gdiff review comments have been added.";
-    }
-    navigator.clipboard.writeText(prompt).then(function () {
-      var button = document.getElementById("gdiff-copy-comments");
-      var label = button.textContent;
-      button.textContent = "Copied";
-      setTimeout(function () { button.textContent = label; }, 1200);
-    }, function () {
-      window.prompt("Copy review feedback", prompt);
-    });
-  }
-
-  function clearComments() {
-    if (!comments.size || !confirm("Clear all gdiff review comments?")) return;
-    comments.clear();
-    saveComments();
-    refreshMarkers();
-    closePanel();
-  }
-
-  function addUi() {
-    var bar = document.createElement("div");
-    bar.className = "gdiff-review-bar";
-    bar.innerHTML = [
-      '<span><span id="gdiff-review-count">0</span> comments</span>',
-      '<button type="button" id="gdiff-copy-comments" class="gdiff-primary">Copy prompt</button>',
-      '<button type="button" id="gdiff-clear-comments">Clear</button>'
-    ].join("");
-    document.body.appendChild(bar);
-
-    document.getElementById("gdiff-copy-comments").addEventListener("click", copyComments);
-    document.getElementById("gdiff-clear-comments").addEventListener("click", clearComments);
-  }
-
-  document.addEventListener("mousedown", function (event) {
-    var target = targetFromEvent(event);
-    if (!target) return;
-    dragTarget = target;
-    isDragging = true;
-    if (!event.shiftKey) anchorTarget = target;
-    event.preventDefault();
-    previewSelection(selectionFromTargets(anchorTarget, target));
-  });
-
-  document.addEventListener("mouseover", function (event) {
-    if (!isDragging || !dragTarget) return;
-    var target = targetFromEvent(event);
-    if (!target || target.row === dragTarget.row) return;
-    dragTarget = target;
-    previewSelection(selectionFromTargets(anchorTarget, target));
-  });
-
-  document.addEventListener("mouseup", function (event) {
-    if (!isDragging) return;
-    isDragging = false;
-    var target = targetFromEvent(event) || dragTarget;
-    var start = event.shiftKey && anchorTarget ? anchorTarget : anchorTarget || target;
-    var selection = selectionFromTargets(start, target);
-    if (!selection) return;
-    anchorTarget = target;
-    openPanel(selection);
-  });
-
-  loadComments();
-  addUi();
-  refreshMarkers();
-})();
-</script>
+</head>
+<body>
+<header class="topbar">
+  <div class="top-left">
+    <button type="button" class="sidebar-toggle" id="sidebar-toggle-top" title="Show files sidebar" aria-label="Show files sidebar">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 3.5h11v9h-11z"/><path d="M6 3.5v9"/></svg>
+    </button>
+    <div class="title"><span class="wordmark">gdiff</span><span class="title-repo">$repo_name</span></div>
+  </div>
+  <div class="top-actions">
+    <div class="view-toggle" aria-label="Diff view">
+      <button type="button" id="view-split" data-diff-style="split">Side by side</button>
+      <button type="button" id="view-unified" data-diff-style="unified">Stacked</button>
+    </div>
+    <button type="button" id="theme-toggle" class="icon-btn" title="Toggle light / dark (t)" aria-label="Toggle light or dark theme">
+      <svg class="moon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6 1.6a6.4 6.4 0 1 0 8.4 8.4A5 5 0 1 1 6 1.6z"/></svg>
+      <svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M12.8 3.2l-1.4 1.4M4.6 11.4l-1.4 1.4" stroke-linecap="round"/></svg>
+    </button>
+    <button type="button" id="help-toggle" class="icon-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M6.2 6.1a1.9 1.9 0 1 1 2.5 1.8c-.5.2-.7.5-.7 1v.3" stroke-linecap="round"/><circle cx="8" cy="11.4" r="0.65" fill="currentColor" stroke="none"/></svg>
+    </button>
+    <div class="stats" id="stats"></div>
+  </div>
+</header>
+<div class="app-shell">
+  <aside class="file-tree" aria-label="Changed files">
+    <div class="file-tree-title"><span>Files</span><button type="button" class="sidebar-toggle" id="sidebar-toggle-tree" title="Collapse files sidebar" aria-label="Collapse files sidebar"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 3.5h11v9h-11z"/><path d="M6 3.5v9"/></svg></button></div>
+    <div class="file-tree-search"><input id="file-search" type="search" placeholder="Filter files..."></div>
+    <div class="tree-meta">
+      <span class="tree-progress" id="tree-progress"></span>
+      <label class="tree-filter"><input type="checkbox" id="unreviewed-only"> Unreviewed only</label>
+    </div>
+    <nav class="file-tree-list is-initial" id="file-list"></nav>
+  </aside>
+  <main id="viewer"></main>
+</div>
+<div class="review-bar">
+  <span class="review-count-label"><span id="review-count">0</span> <span id="review-noun">comments</span></span>
+  <button type="button" id="copy-comments" class="primary">Copy prompt</button>
+  <button type="button" id="clear-comments">Clear</button>
+</div>
+<div class="help-overlay" id="help-overlay">
+  <div class="help-card" role="dialog" aria-label="Keyboard shortcuts">
+    <h2>Review shortcuts</h2>
+    <p>gdiff — Atelier</p>
+    <div class="help-row"><span>Next / previous file</span><span><kbd>j</kbd> <kbd>k</kbd></span></div>
+    <div class="help-row"><span>Toggle "viewed" on active file</span><kbd>v</kbd></div>
+    <div class="help-row"><span>Comment on active file</span><kbd>c</kbd></div>
+    <div class="help-row"><span>Toggle light / dark</span><kbd>t</kbd></div>
+    <div class="help-row"><span>Show / hide this help</span><kbd>?</kbd></div>
+  </div>
+</div>
+<script id="patch-data" type="text/plain">
 EOF
+base64 -i "$patch_file" >>"$out"
+cat >>"$out" <<EOF
+</script>
+<script id="patch-more-data" type="text/plain">
+EOF
+base64 -i "$patch_more_file" >>"$out"
+cat >>"$out" <<EOF
+</script>
+<script id="patch-full-data" type="text/plain">
+EOF
+base64 -i "$patch_full_file" >>"$out"
+cat >>"$out" <<EOF
+</script>
+<script type="module">
+import { CodeView, parsePatchFiles } from "https://esm.sh/@pierre/diffs@$diffs_version?bundle";
+import * as Diffs from "https://esm.sh/@pierre/diffs@$diffs_version?bundle";
+
+// Custom "Atelier" theme — warm paper canvas with jewel-tone syntax. Authored as a
+// standard Shiki / VS Code theme JSON; CodeView references it by name (gdiff-atelier).
+const atelierTheme = {
+  name: "gdiff-atelier",
+  type: "light",
+  colors: {
+    "editor.background": "#f7f4ec",
+    "editor.foreground": "#2c2823",
+    "editorLineNumber.foreground": "#bcb3a1",
+    "editorLineNumber.activeForeground": "#8c8475",
+    "editor.selectionBackground": "#e2dac9",
+    "editorCursor.foreground": "#0e7c6b",
+    "diffEditor.insertedTextBackground": "rgba(77,124,15,0.16)",
+    "diffEditor.removedTextBackground": "rgba(168,50,74,0.16)",
+    "diffEditor.insertedLineBackground": "rgba(77,124,15,0.10)",
+    "diffEditor.removedLineBackground": "rgba(168,50,74,0.10)"
+  },
+  tokenColors: [
+    { scope: ["comment", "punctuation.definition.comment"], settings: { foreground: "#a59b88", fontStyle: "italic" } },
+    { scope: ["keyword", "keyword.control", "storage", "storage.type", "storage.modifier"], settings: { foreground: "#a8324a" } },
+    { scope: ["keyword.operator"], settings: { foreground: "#9a5b00" } },
+    { scope: ["string", "string.quoted", "punctuation.definition.string"], settings: { foreground: "#4d7c0f" } },
+    { scope: ["constant.numeric", "constant.language", "constant.character"], settings: { foreground: "#9a5b00" } },
+    { scope: ["entity.name.function", "support.function", "meta.function-call"], settings: { foreground: "#b45309" } },
+    { scope: ["entity.name.type", "entity.name.class", "support.type", "support.class"], settings: { foreground: "#0e7c6b" } },
+    { scope: ["variable", "variable.other", "meta.definition.variable"], settings: { foreground: "#2c2823" } },
+    { scope: ["variable.parameter"], settings: { foreground: "#6f5b3e" } },
+    { scope: ["entity.other.attribute-name", "support.type.property-name", "meta.object-literal.key"], settings: { foreground: "#0b6557" } },
+    { scope: ["entity.name.tag"], settings: { foreground: "#a8324a" } },
+    { scope: ["punctuation", "meta.brace"], settings: { foreground: "#6f6757" } },
+    { scope: ["markup.heading", "markup.bold"], settings: { foreground: "#a8324a", fontStyle: "bold" } },
+    { scope: ["markup.inserted"], settings: { foreground: "#4d7c0f" } },
+    { scope: ["markup.deleted"], settings: { foreground: "#a8324a" } },
+    { scope: ["string.regexp"], settings: { foreground: "#0e7c6b" } }
+  ]
+};
+
+// Dark sibling — warm "Noir". Same jewel-tone family, lifted for a dark canvas.
+const noirTheme = {
+  name: "gdiff-noir",
+  type: "dark",
+  colors: {
+    "editor.background": "#161310",
+    "editor.foreground": "#ece4d6",
+    "editorLineNumber.foreground": "#5f574a",
+    "editorLineNumber.activeForeground": "#9a8f7d",
+    "editor.selectionBackground": "#322b22",
+    "editorCursor.foreground": "#5bbfae",
+    "diffEditor.insertedTextBackground": "rgba(140,179,90,0.18)",
+    "diffEditor.removedTextBackground": "rgba(224,107,134,0.18)",
+    "diffEditor.insertedLineBackground": "rgba(140,179,90,0.10)",
+    "diffEditor.removedLineBackground": "rgba(224,107,134,0.10)"
+  },
+  tokenColors: [
+    { scope: ["comment", "punctuation.definition.comment"], settings: { foreground: "#7d7464", fontStyle: "italic" } },
+    { scope: ["keyword", "keyword.control", "storage", "storage.type", "storage.modifier"], settings: { foreground: "#e06b86" } },
+    { scope: ["keyword.operator"], settings: { foreground: "#d99b5a" } },
+    { scope: ["string", "string.quoted", "punctuation.definition.string"], settings: { foreground: "#8cb35a" } },
+    { scope: ["constant.numeric", "constant.language", "constant.character"], settings: { foreground: "#d99b5a" } },
+    { scope: ["entity.name.function", "support.function", "meta.function-call"], settings: { foreground: "#e0954a" } },
+    { scope: ["entity.name.type", "entity.name.class", "support.type", "support.class"], settings: { foreground: "#5bbfae" } },
+    { scope: ["variable", "variable.other", "meta.definition.variable"], settings: { foreground: "#ece4d6" } },
+    { scope: ["variable.parameter"], settings: { foreground: "#c9b48f" } },
+    { scope: ["entity.other.attribute-name", "support.type.property-name", "meta.object-literal.key"], settings: { foreground: "#5bbfae" } },
+    { scope: ["entity.name.tag"], settings: { foreground: "#e06b86" } },
+    { scope: ["punctuation", "meta.brace"], settings: { foreground: "#9a8f7d" } },
+    { scope: ["markup.heading", "markup.bold"], settings: { foreground: "#e06b86", fontStyle: "bold" } },
+    { scope: ["markup.inserted"], settings: { foreground: "#8cb35a" } },
+    { scope: ["markup.deleted"], settings: { foreground: "#e06b86" } },
+    { scope: ["string.regexp"], settings: { foreground: "#5bbfae" } }
+  ]
+};
+
+let themeName = "$diffs_theme";
+let customThemesReady = false;
+try {
+  if (typeof Diffs.registerCustomTheme === "function") {
+    // 2nd arg is an async loader the highlighter calls to resolve the theme by name.
+    await Diffs.registerCustomTheme("gdiff-atelier", async () => atelierTheme);
+    await Diffs.registerCustomTheme("gdiff-noir", async () => noirTheme);
+    customThemesReady = true;
+  } else if (themeName === "gdiff-atelier") {
+    themeName = "pierre-light";
+  }
+} catch (error) {
+  if (themeName === "gdiff-atelier") themeName = "pierre-light";
 }
 
-printf '%s' "$diff_text" | npx --yes diff2html-cli \
-  --style side \
-  --highlightCode true \
-  --summary closed \
-  --title "$title" \
-  -i stdin \
-  -F "$out" >/dev/null
+// atob yields a Latin-1 byte string; reinterpret those bytes as UTF-8 so multibyte
+// characters in the diff (em-dashes, accents, emoji) render correctly instead of mojibake.
+function decodeBase64Utf8(raw) {
+  const binary = atob(String(raw || "").replace(/\\s/g, ""));
+  const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+  return new TextDecoder("utf-8").decode(bytes);
+}
+const patchPayloads = {
+  compact: decodeBase64Utf8(document.getElementById("patch-data").textContent),
+  more: decodeBase64Utf8(document.getElementById("patch-more-data").textContent),
+  full: decodeBase64Utf8(document.getElementById("patch-full-data").textContent)
+};
+let baseItems = [];
+const comments = new Map();
+const storageKey = "gdiff-review-comments:" + location.pathname;
+const viewStorageKey = "gdiff-view-style:" + location.pathname;
+const viewedStorageKey = "gdiff-viewed-files:" + location.pathname;
+const collapsedDirsStorageKey = "gdiff-collapsed-dirs:" + location.pathname;
+const sidebarStorageKey = "gdiff-sidebar-collapsed:" + location.pathname;
+const unreviewedStorageKey = "gdiff-unreviewed-only:" + location.pathname;
+const themeStorageKey = "gdiff-theme-mode:" + location.pathname;
+let diffStyle = localStorage.getItem(viewStorageKey) === "unified" ? "unified" : "split";
+let viewedFiles = new Set(JSON.parse(localStorage.getItem(viewedStorageKey) || "[]"));
+let collapsedDirs = new Set(JSON.parse(localStorage.getItem(collapsedDirsStorageKey) || "[]"));
+let sidebarCollapsed = localStorage.getItem(sidebarStorageKey) === "1";
+let showUnreviewedOnly = localStorage.getItem(unreviewedStorageKey) === "1";
+let darkMode = localStorage.getItem(themeStorageKey) === "dark";
+let fileFilter = "";
+let activeItemId = null;
+let itemVersionSeed = 0;
+const expandedItemModes = new Map();
+let currentTarget = null;
+let lastLineTarget = null;
 
-add_review_tools
+// Config injected from gdiff env (GDIFF_TOKEN_HOOKS / GDIFF_ITEM_METRICS).
+const tokenHooksEnabled = "$token_hooks" === "1";
+const itemMetrics = $item_metrics;
+
+let tokenTipEl = null;
+function showTokenTip(props, event) {
+  if (!props) return;
+  const text = props.tokenText || props.text || "";
+  if (!text) return;
+  const line = props.lineNumber != null ? props.lineNumber : (props.line != null ? props.line : "");
+  if (!tokenTipEl) {
+    tokenTipEl = document.createElement("div");
+    tokenTipEl.className = "gdiff-token-tip";
+    document.body.appendChild(tokenTipEl);
+  }
+  tokenTipEl.textContent = line !== "" ? text + "  ·  line " + line : text;
+  const ev = event || props.event;
+  const x = ev && ev.clientX != null ? ev.clientX : 16;
+  const y = ev && ev.clientY != null ? ev.clientY : 24;
+  tokenTipEl.style.left = Math.min(x + 12, window.innerWidth - 260) + "px";
+  tokenTipEl.style.top = Math.max(8, y - 34) + "px";
+  tokenTipEl.style.display = "block";
+}
+function hideTokenTip() {
+  if (tokenTipEl) tokenTipEl.style.display = "none";
+}
+
+function lineSide(side) {
+  return side === "deletions" ? "old" : "new";
+}
+
+function annotationSide(side) {
+  return side === "old" ? "deletions" : "additions";
+}
+
+function commentId(target) {
+  if (target.kind === "file") return [target.itemId, "file"].join(":");
+  return [target.itemId, target.side, target.startLine + "-" + target.endLine].join(":");
+}
+
+function itemIdForFile(fileDiff, patchIndex, fileIndex) {
+  return patchIndex + ":" + fileIndex + ":" + fileDiff.name;
+}
+
+function saveViewedFiles() {
+  localStorage.setItem(viewedStorageKey, JSON.stringify(Array.from(viewedFiles)));
+}
+
+function saveCollapsedDirs() {
+  localStorage.setItem(collapsedDirsStorageKey, JSON.stringify(Array.from(collapsedDirs)));
+}
+
+function syncSidebarCollapsed() {
+  document.querySelector(".app-shell").classList.toggle("is-sidebar-collapsed", sidebarCollapsed);
+  document.body.classList.toggle("is-sidebar-collapsed", sidebarCollapsed);
+  document.getElementById("sidebar-toggle-top").setAttribute("aria-pressed", sidebarCollapsed ? "true" : "false");
+}
+
+function setSidebarCollapsed(collapsed) {
+  sidebarCollapsed = collapsed;
+  localStorage.setItem(sidebarStorageKey, sidebarCollapsed ? "1" : "0");
+  syncSidebarCollapsed();
+}
+
+function parseItems(mode) {
+  return parsePatchFiles(patchPayloads[mode], "gdiff-" + mode).flatMap((patch, patchIndex) =>
+    patch.files.map((fileDiff, fileIndex) => {
+      const itemId = itemIdForFile(fileDiff, patchIndex, fileIndex);
+      const item = {
+        id: itemId,
+        type: "diff",
+        fileDiff,
+        annotations: [],
+        version: itemVersionSeed
+      };
+      if (viewedFiles.has(itemId)) item.collapsed = true;
+      item.annotations = annotationsForItem(item);
+      return item;
+    })
+  );
+}
+
+function itemsForCurrentContext() {
+  const compactItems = parseItems("compact");
+  if (!expandedItemModes.size) return compactItems;
+  const moreItems = parseItems("more");
+  const fullItems = parseItems("full");
+  const moreById = new Map(moreItems.map(item => [item.id, item]));
+  const fullById = new Map(fullItems.map(item => [item.id, item]));
+  return compactItems.map(item => {
+    const mode = expandedItemModes.get(item.id);
+    if (mode === "full") return fullById.get(item.id) || item;
+    if (mode === "more") return moreById.get(item.id) || item;
+    return item;
+  });
+}
+
+function loadPatchView(scrollItemId) {
+  itemVersionSeed += 1;
+  const previousTarget = currentTarget;
+  baseItems = itemsForCurrentContext();
+  currentTarget = previousTarget && baseItems.some(item => item.id === previousTarget.itemId) ? previousTarget : null;
+  if (currentTarget) {
+    const item = baseItems.find(item => item.id === currentTarget.itemId);
+    if (item) item.annotations = annotationsForItem(item);
+  }
+  viewer.setItems(baseItems);
+  renderFileList();
+  syncContextToggle();
+  updateReviewCount();
+  if (scrollItemId) {
+    requestAnimationFrame(() => {
+      viewer.scrollTo({ type: "position", position: viewer.getTopForItem(scrollItemId) || 0, behavior: "smooth" });
+    });
+  }
+  scheduleHunkEnhancement();
+}
+
+function loadComments() {
+  try {
+    JSON.parse(localStorage.getItem(storageKey) || "[]").forEach(comment => {
+      comments.set(comment.id, comment);
+    });
+  } catch {
+    comments.clear();
+  }
+}
+
+function saveComments() {
+  localStorage.setItem(storageKey, JSON.stringify(Array.from(comments.values())));
+}
+
+function itemForId(itemId) {
+  return baseItems.find(item => item.id === itemId);
+}
+
+function fileStat(fileDiff) {
+  const add = fileDiff.insertions ?? fileDiff.additions ?? fileDiff.added;
+  const del = fileDiff.deletions ?? fileDiff.removed ?? fileDiff.deleted;
+  return { add: Number.isFinite(add) ? add : null, del: Number.isFinite(del) ? del : null };
+}
+
+function fileStatusGlyph(fileDiff, stat) {
+  const type = String(fileDiff.type || fileDiff.status || fileDiff.changeType || "").toLowerCase();
+  if (fileDiff.isNew || type.startsWith("a") || (stat.add && stat.del === 0)) return { ch: "A", cls: "s-add" };
+  if (fileDiff.isDelete || fileDiff.isDeleted || type.startsWith("d") || (stat.del && stat.add === 0)) return { ch: "D", cls: "s-del" };
+  if (fileDiff.isRename || type.startsWith("r")) return { ch: "R", cls: "s-mod" };
+  return { ch: "M", cls: "s-mod" };
+}
+
+const COMMENT_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 3h10v7H7l-3 2.4V10H3z"/></svg>';
+
+function commentCountForItem(itemId) {
+  let count = 0;
+  for (const comment of comments.values()) if (comment.itemId === itemId) count += 1;
+  return count;
+}
+
+function updateProgress() {
+  const el = document.getElementById("tree-progress");
+  if (!el) return;
+  let viewed = 0;
+  for (const item of baseItems) if (viewedFiles.has(item.id)) viewed += 1;
+  el.innerHTML = "<b>" + viewed + "</b> / " + baseItems.length + " viewed";
+}
+
+function renderFileList() {
+  const list = document.getElementById("file-list");
+  const filter = fileFilter.trim().toLowerCase();
+  const dirCounts = new Map();
+  const items = baseItems
+    .filter(item => !filter || item.fileDiff.name.toLowerCase().includes(filter))
+    .filter(item => !showUnreviewedOnly || !viewedFiles.has(item.id))
+    .slice()
+    .sort((a, b) => a.fileDiff.name.localeCompare(b.fileDiff.name));
+  for (const item of items) {
+    const parts = item.fileDiff.name.split("/");
+    parts.pop();
+    for (let index = 0; index < parts.length; index += 1) {
+      const dir = parts.slice(0, index + 1).join("/");
+      dirCounts.set(dir, (dirCounts.get(dir) || 0) + 1);
+    }
+  }
+  const renderedDirs = new Set();
+  const rows = [];
+  for (const item of items) {
+    const parts = item.fileDiff.name.split("/");
+    const file = parts.pop();
+    let hiddenByCollapsedDir = false;
+    for (let index = 0; index < parts.length; index += 1) {
+      const dir = parts.slice(0, index + 1).join("/");
+      const collapsed = collapsedDirs.has(dir);
+      if (!renderedDirs.has(dir)) {
+        renderedDirs.add(dir);
+        rows.push('<button type="button" class="file-tree-folder' + (collapsed ? ' is-collapsed' : '') + '" data-dir="' + escapeHtml(dir) + '" style="padding-left:' + (8 + Math.min(index, 6) * 12) + 'px">' +
+          '<span class="file-tree-file">' + escapeHtml(parts[index]) + '</span>' +
+          '<span class="file-tree-count">' + (dirCounts.get(dir) || 0) + '</span>' +
+          '</button>');
+      }
+      if (!filter && collapsed) {
+        hiddenByCollapsedDir = true;
+        break;
+      }
+    }
+    if (hiddenByCollapsedDir) continue;
+    const viewedClass = viewedFiles.has(item.id) ? " is-viewed" : "";
+    const activeClass = item.id === activeItemId ? " is-active" : "";
+    const stat = fileStat(item.fileDiff);
+    const glyph = fileStatusGlyph(item.fileDiff, stat);
+    const statHtml =
+      (stat.add != null ? '<span class="file-tree-stat is-add">+' + stat.add + '</span>' : '') +
+      (stat.del != null ? '<span class="file-tree-stat is-del">−' + stat.del + '</span>' : '');
+    const commentCount = commentCountForItem(item.id);
+    const commentHtml = commentCount
+      ? '<span class="file-tree-comments" title="' + commentCount + ' comment' + (commentCount === 1 ? '' : 's') + '">' + COMMENT_ICON + commentCount + '</span>'
+      : '';
+    rows.push('<button type="button" class="file-tree-item' + viewedClass + activeClass + '" data-file-jump="' + escapeHtml(item.id) + '" style="padding-left:' + (12 + Math.min(parts.length, 6) * 12) + 'px">' +
+      '<span class="file-tree-status ' + glyph.cls + '">' + glyph.ch + '</span>' +
+      '<span class="file-tree-file">' + escapeHtml(file) + '</span>' +
+      commentHtml +
+      statHtml +
+      '</button>');
+  }
+  list.innerHTML = rows.length ? rows.join("") : '<div class="file-tree-empty">No files match.</div>';
+  updateProgress();
+}
+
+function escapeHtml(value) {
+  return String(value == null ? "" : value).replace(/[&<>"]/g, char => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\\"": "&quot;"
+  })[char]);
+}
+
+function annotationsForItem(item) {
+  const annotations = Array.from(comments.values())
+    .filter(comment => comment.kind !== "file" && comment.itemId === item.id)
+    .map(comment => ({
+      side: annotationSide(comment.side),
+      lineNumber: comment.endLine,
+      metadata: { kind: "comment", comment }
+    }));
+  if (currentTarget && currentTarget.kind !== "file" && currentTarget.itemId === item.id) {
+    annotations.push({
+      side: annotationSide(currentTarget.side),
+      lineNumber: currentTarget.endLine,
+      metadata: { kind: "editor", target: currentTarget }
+    });
+  }
+  return annotations;
+}
+
+function syncItemAnnotations(item) {
+  if (!item) return;
+  const annotations = annotationsForItem(item);
+  item.annotations = annotations;
+  item.version = (item.version || 0) + 1;
+  viewer.updateItem(item);
+}
+
+function updateReviewCount() {
+  const n = comments.size;
+  document.getElementById("review-count").textContent = String(n);
+  const noun = document.getElementById("review-noun");
+  if (noun) noun.textContent = n === 1 ? "comment" : "comments";
+}
+
+function refreshAnnotations(itemId) {
+  if (itemId) {
+    syncItemAnnotations(itemForId(itemId));
+  } else {
+    for (const item of baseItems) syncItemAnnotations(item);
+  }
+  updateReviewCount();
+}
+
+function renderAnnotation(annotation) {
+  if (annotation.metadata && annotation.metadata.kind === "editor") {
+    const target = annotation.metadata.target;
+    const existing = comments.get(commentId(target));
+    const panel = document.createElement("section");
+    panel.className = "review-panel";
+    panel.style.width = "min(720px, 100%)";
+    panel.style.maxWidth = "100%";
+    panel.style.boxSizing = "border-box";
+    panel.innerHTML =
+      '<p class="review-target"></p>' +
+      '<pre class="review-code"></pre>' +
+      '<textarea class="review-comment" placeholder="Leave feedback for this line"></textarea>' +
+      '<div class="review-actions">' +
+      '<span class="review-hint">⌘↵ to save · Esc to cancel</span>' +
+      '<button type="button" class="review-cancel">Cancel</button>' +
+      '<button type="button" class="review-save primary">Save comment</button>' +
+      '</div>';
+    panel.querySelector(".review-target").textContent = target.file + ":" + lineLabel(target) + " (" + target.side + ")";
+    panel.querySelector(".review-code").textContent = target.code || "";
+    const textarea = panel.querySelector(".review-comment");
+    textarea.value = existing ? existing.comment : "";
+    panel.querySelector(".review-save").addEventListener("click", () => saveCurrentComment(textarea.value));
+    panel.querySelector(".review-cancel").addEventListener("click", closePanel);
+    textarea.addEventListener("keydown", event => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") saveCurrentComment(textarea.value);
+      if (event.key === "Escape") closePanel();
+    });
+    setTimeout(() => textarea.focus(), 0);
+    return panel;
+  }
+  const node = document.createElement("span");
+  node.className = "gdiff-annotation";
+  node.textContent = "comment";
+  node.title = annotation.metadata.comment.comment;
+  return node;
+}
+
+function openComment(target, anchor) {
+  if (target.kind === "file") {
+    currentTarget = target;
+    renderFileCommentPanel(target, anchor);
+    return;
+  }
+  target.startLine = target.startLine || target.line;
+  target.endLine = target.endLine || target.line;
+  const previousItemId = currentTarget && currentTarget.kind !== "file" ? currentTarget.itemId : null;
+  currentTarget = target;
+  if (previousItemId && previousItemId !== currentTarget.itemId) refreshAnnotations(previousItemId);
+  refreshAnnotations(currentTarget.itemId);
+}
+
+function openLineTarget(target, event) {
+  if (event && event.shiftKey && lastLineTarget && lastLineTarget.itemId === target.itemId && lastLineTarget.side === target.side) {
+    const startLine = Math.min(lastLineTarget.startLine, target.startLine);
+    const endLine = Math.max(lastLineTarget.endLine, target.endLine);
+    const rangeTarget = {
+      itemId: target.itemId,
+      file: target.file,
+      side: target.side,
+      startLine,
+      endLine,
+      code: "Selected lines " + startLine + "-" + endLine
+    };
+    lastLineTarget = target;
+    openComment(rangeTarget);
+    return;
+  }
+  lastLineTarget = target;
+  openComment(target);
+}
+
+function renderFileCommentPanel(target, anchor) {
+  closeFileCommentPanel();
+  const existing = comments.get(commentId(target));
+  const panel = document.createElement("section");
+  panel.id = "file-comment-panel";
+  panel.className = "review-panel is-file-comment";
+  panel.style.position = "fixed";
+  panel.style.zIndex = "31";
+  panel.style.width = "min(560px, calc(100vw - 32px))";
+  panel.style.maxWidth = "calc(100vw - 32px)";
+  panel.style.height = "auto";
+  panel.style.minHeight = "0";
+  panel.innerHTML =
+    '<p class="review-target"></p>' +
+    '<textarea class="review-comment" placeholder="Leave feedback for this file"></textarea>' +
+    '<div class="review-actions">' +
+    '<span class="review-hint">⌘↵ to save · Esc to cancel</span>' +
+    '<button type="button" class="review-cancel">Cancel</button>' +
+    '<button type="button" class="review-save primary">Save comment</button>' +
+    '</div>';
+  panel.querySelector(".review-target").textContent = target.file + " (file comment)";
+  const textarea = panel.querySelector(".review-comment");
+  textarea.value = existing ? existing.comment : "";
+  panel.querySelector(".review-save").addEventListener("click", () => saveCurrentComment(textarea.value));
+  panel.querySelector(".review-cancel").addEventListener("click", closePanel);
+  textarea.addEventListener("keydown", event => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") saveCurrentComment(textarea.value);
+    if (event.key === "Escape") closePanel();
+  });
+  document.body.appendChild(panel);
+  if (anchor) {
+    const rect = anchor.getBoundingClientRect();
+    const panelWidth = Math.min(560, window.innerWidth - 32);
+    panel.style.left = Math.max(16, Math.min(rect.right - panelWidth, window.innerWidth - panelWidth - 16)) + "px";
+    panel.style.top = Math.min(rect.bottom + 8, window.innerHeight - 220) + "px";
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+  } else {
+    panel.style.right = "16px";
+    panel.style.bottom = "68px";
+  }
+  textarea.focus();
+}
+
+function closeFileCommentPanel() {
+  document.getElementById("file-comment-panel")?.remove();
+}
+
+function lineLabel(target) {
+  return target.startLine === target.endLine ? String(target.startLine) : target.startLine + "-" + target.endLine;
+}
+
+function closePanel() {
+  const previousItemId = currentTarget && currentTarget.kind !== "file" ? currentTarget.itemId : null;
+  closeFileCommentPanel();
+  currentTarget = null;
+  if (previousItemId) refreshAnnotations(previousItemId);
+}
+
+function saveCurrentComment(rawValue) {
+  if (!currentTarget) return;
+  const value = String(rawValue || "").trim();
+  const id = commentId(currentTarget);
+  if (!value) {
+    comments.delete(id);
+  } else {
+    comments.set(id, {
+      id,
+      kind: currentTarget.kind || "line",
+      itemId: currentTarget.itemId,
+      file: currentTarget.file,
+      side: currentTarget.side,
+      line: currentTarget.startLine || 0,
+      startLine: currentTarget.startLine || 0,
+      endLine: currentTarget.endLine || 0,
+      code: currentTarget.code,
+      comment: value
+    });
+  }
+  saveComments();
+  if (currentTarget.kind === "file") {
+    syncItemAnnotations(itemForId(currentTarget.itemId));
+  }
+  updateReviewCount();
+  renderFileList();
+  closePanel();
+}
+
+function buildPrompt() {
+  const xml = value => String(value).replace(/[<>&'"]/g, char => ({
+    "<": "&lt;",
+    ">": "&gt;",
+    "&": "&amp;",
+    "'": "&apos;",
+    "\\"": "&quot;"
+  })[char]);
+  const list = Array.from(comments.values()).sort((a, b) =>
+    a.file.localeCompare(b.file) || a.startLine - b.startLine || a.side.localeCompare(b.side)
+  );
+  const lines = [
+    "Please address the following line-level review feedback from the git diff.",
+    "",
+    "Before editing, inspect all comments and target locations first so line numbers do not drift while you work.",
+    "Then address the comments one by one.",
+    "",
+    "Return a concise summary of the changes you made and call out any feedback you could not apply.",
+    "",
+    "<review_feedback>"
+  ];
+  list.forEach((comment, index) => {
+    lines.push("  <comment index=\\"" + (index + 1) + "\\">");
+    lines.push("    <file>" + xml(comment.file) + "</file>");
+    if (comment.kind === "file") {
+      lines.push("    <scope>file</scope>");
+    } else {
+      lines.push("    <lines side=\\"" + xml(comment.side) + "\\" start=\\"" + xml(comment.startLine) + "\\" end=\\"" + xml(comment.endLine) + "\\" />");
+    }
+    lines.push("    <code>" + xml(comment.code) + "</code>");
+    lines.push("    <feedback>" + xml(comment.comment) + "</feedback>");
+    lines.push("  </comment>");
+  });
+  lines.push("</review_feedback>");
+  return lines.join("\\n");
+}
+
+function copyComments() {
+  const prompt = comments.size ? buildPrompt() : "No gdiff review comments have been added.";
+  navigator.clipboard.writeText(prompt).then(() => {
+    const button = document.getElementById("copy-comments");
+    const label = button.textContent;
+    button.textContent = "Copied";
+    setTimeout(() => { button.textContent = label; }, 1200);
+  }, () => {
+    window.prompt("Copy review feedback", prompt);
+  });
+}
+
+function clearComments() {
+  if (!comments.size || !confirm("Clear all gdiff review comments?")) return;
+  comments.clear();
+  saveComments();
+  refreshAnnotations();
+  renderFileList();
+  closePanel();
+}
+
+const codeViewOptions = {
+  diffStyle,
+  theme: themeName,
+  themeType: "$diffs_theme_type",
+  stickyHeaders: true,
+  itemMetrics: itemMetrics || undefined,
+  useTokenTransformer: tokenHooksEnabled,
+  overflow: "scroll",
+  lineHoverHighlight: "both",
+  hunkSeparators: "line-info-basic",
+  enableLineSelection: true,
+  renderAnnotation,
+  renderHeaderMetadata,
+  enableTokenInteractionsOnWhitespace: true,
+  onLineClick(...args) {
+    const props = args[0];
+    const context = args[args.length - 1];
+    if (!props || !context || !context.item) return;
+    const side = lineSide(props.annotationSide);
+    const item = context.item;
+    openLineTarget({
+      itemId: item.id,
+      file: item.fileDiff.name,
+      side,
+      startLine: props.lineNumber,
+      endLine: props.lineNumber,
+      code: props.lineElement ? props.lineElement.textContent.trim() : "",
+    }, props.event);
+  },
+  onLineNumberClick(...args) {
+    const props = args[0];
+    const context = args[args.length - 1];
+    if (!props || !context || !context.item) return;
+    const side = lineSide(props.annotationSide);
+    const item = context.item;
+    openLineTarget({
+      itemId: item.id,
+      file: item.fileDiff.name,
+      side,
+      startLine: props.lineNumber,
+      endLine: props.lineNumber,
+      code: props.lineElement ? props.lineElement.textContent.trim() : "",
+    }, props.event);
+  },
+  onTokenClick(...args) {
+    const props = args[0];
+    const context = args[args.length - 1];
+    if (!props || !context || !context.item) return;
+    const side = lineSide(props.side);
+    const item = context.item;
+    openLineTarget({
+      itemId: item.id,
+      file: item.fileDiff.name,
+      side,
+      startLine: props.lineNumber,
+      endLine: props.lineNumber,
+      code: props.tokenElement?.closest("[data-line-index]")?.textContent?.trim() || props.tokenText || "",
+    }, args[1]);
+  },
+  onTokenEnter(...args) {
+    if (tokenHooksEnabled) showTokenTip(args[0], args[1]);
+  },
+  onTokenLeave() {
+    hideTokenTip();
+  },
+  onLineSelected(range, context) {
+    if (!range || !context || !context.item) return;
+    const side = lineSide(range.side || range.endSide || "additions");
+    const startLine = Math.min(range.start, range.end);
+    const endLine = Math.max(range.start, range.end);
+    openComment({
+      itemId: context.item.id,
+      file: context.item.fileDiff.name,
+      side,
+      startLine,
+      endLine,
+      code: "Selected lines " + startLine + "-" + endLine
+    });
+  }
+};
+
+// Restore a persisted dark choice before first paint so there's no light->dark flash.
+if (darkMode) {
+  document.body.classList.add("theme-dark");
+  codeViewOptions.theme = customThemesReady ? "gdiff-noir" : "pierre-dark";
+  codeViewOptions.themeType = "dark";
+}
+
+const viewer = new CodeView(codeViewOptions);
+
+function applyTheme(dark) {
+  darkMode = dark;
+  localStorage.setItem(themeStorageKey, dark ? "dark" : "light");
+  document.body.classList.toggle("theme-dark", dark);
+  codeViewOptions.theme = customThemesReady ? (dark ? "gdiff-noir" : "gdiff-atelier") : (dark ? "pierre-dark" : "pierre-light");
+  codeViewOptions.themeType = dark ? "dark" : "light";
+  viewer.setOptions(codeViewOptions);
+  for (const item of baseItems) item.version = (item.version || 0) + 1;
+  viewer.setItems(baseItems);
+  scheduleHunkEnhancement();
+}
+
+function toggleHelp() {
+  document.getElementById("help-overlay").classList.toggle("is-open");
+}
+function closeHelp() {
+  document.getElementById("help-overlay").classList.remove("is-open");
+}
+
+function syncViewToggle() {
+  document.querySelectorAll("[data-diff-style]").forEach(button => {
+    button.setAttribute("aria-pressed", button.dataset.diffStyle === diffStyle ? "true" : "false");
+  });
+}
+
+function setDiffStyle(nextStyle) {
+  if (nextStyle !== "split" && nextStyle !== "unified") return;
+  diffStyle = nextStyle;
+  codeViewOptions.diffStyle = diffStyle;
+  localStorage.setItem(viewStorageKey, diffStyle);
+  syncViewToggle();
+  viewer.setOptions(codeViewOptions);
+  for (const item of baseItems) item.version = (item.version || 0) + 1;
+  viewer.setItems(baseItems);
+  scheduleHunkEnhancement();
+}
+
+function itemContextMode(itemId) {
+  return expandedItemModes.get(itemId) || "compact";
+}
+
+function nextContextMode(itemId) {
+  const mode = itemContextMode(itemId);
+  if (mode === "compact") return "more";
+  if (mode === "more") return "full";
+  return "full";
+}
+
+function expandItemContext(itemId) {
+  if (!itemId) return;
+  expandedItemModes.set(itemId, nextContextMode(itemId));
+  loadPatchView(itemId);
+}
+
+function eachRoot(callback) {
+  const visit = root => {
+    callback(root);
+    root.querySelectorAll("*").forEach(node => {
+      if (node.shadowRoot) visit(node.shadowRoot);
+    });
+  };
+  visit(document);
+}
+
+// @pierre/diffs renders rows/headers inside shadow roots. Document <style> rules do not
+// pierce shadow boundaries, but CSS custom properties (our tokens) DO inherit through them,
+// so we adopt one stylesheet (written in terms of var(--*)) into every shadow root. Adopting
+// it once per root is enough — virtualized rows mounted later in that root inherit it.
+const diffThemeCss = [
+  ".gdiff-annotation{display:inline-flex;align-items:center;gap:4px;margin-inline-start:6px;padding:1px 8px;border-radius:999px;background:var(--accent-subtle);color:var(--accent-fg);font:11px -apple-system,BlinkMacSystemFont,sans-serif;}",
+  ".gdiff-header-actions{display:inline-flex;gap:8px;align-items:center;margin-inline-start:8px;}",
+  ".gdiff-header-actions label{display:inline-flex;gap:4px;align-items:center;color:var(--muted);font:12px -apple-system,BlinkMacSystemFont,sans-serif;cursor:pointer;}",
+  ".gdiff-comment-button{position:relative;display:inline-flex;align-items:center;justify-content:center;width:28px;height:26px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;}",
+  ".gdiff-comment-button:hover{background:var(--accent-subtle);color:var(--accent-fg);}",
+  ".gdiff-comment-button[data-count]:not([data-count='0']){color:var(--accent-fg);}",
+  ".gdiff-expand-hunk{display:inline-flex;align-items:center;justify-content:center;width:28px;height:18px;margin:0 8px 0 0;padding:0;border:1px solid transparent;border-radius:4px;background:transparent;color:var(--accent-fg);cursor:pointer;}",
+  ".gdiff-expand-hunk:hover:not([disabled]){background:var(--accent-subtle);}",
+  ".gdiff-expand-hunk[disabled]{opacity:0.4;cursor:default;}",
+  ".review-panel{width:min(640px,100%);max-width:100%;box-sizing:border-box;padding:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);box-shadow:var(--overlay-shadow);}",
+  ".review-target{margin:0 0 8px;color:var(--muted);font-size:12px;overflow-wrap:anywhere;}",
+  ".review-code{margin:0 0 8px;max-height:110px;overflow:auto;padding:8px;border-radius:6px;background:var(--bg-inset);font:12px var(--mono);white-space:pre-wrap;}",
+  ".review-panel textarea{width:100%;min-height:90px;resize:vertical;margin:0 0 8px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit;}",
+  ".review-actions{display:flex;gap:8px;justify-content:flex-end;align-items:center;}",
+  ".review-hint{margin-right:auto;color:var(--muted);font-size:11px;}",
+  ".review-panel button{border:1px solid var(--border);border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer;font:inherit;padding:6px 10px;}",
+  ".review-panel button.primary{border-color:var(--primary);background:var(--primary);color:#fff;}"
+].join("");
+
+let diffSheet = null;
+function ensureDiffSheet() {
+  if (diffSheet !== null) return diffSheet;
+  try {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(diffThemeCss);
+    diffSheet = sheet;
+  } catch (error) {
+    diffSheet = false;
+  }
+  return diffSheet;
+}
+
+function adoptDiffStyles() {
+  const sheet = ensureDiffSheet();
+  if (!sheet) return;
+  eachRoot(root => {
+    if (root === document || !("adoptedStyleSheets" in root)) return;
+    if (!root.adoptedStyleSheets.includes(sheet)) {
+      root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+    }
+  });
+}
+
+let enhanceQueued = false;
+function queueEnhance() {
+  if (enhanceQueued) return;
+  enhanceQueued = true;
+  window.requestAnimationFrame(() => {
+    enhanceQueued = false;
+    adoptDiffStyles();
+    enhanceHunkSeparators();
+  });
+}
+
+function observeDiffViewer() {
+  const target = document.getElementById("viewer");
+  if (!target || typeof MutationObserver === "undefined") return;
+  // New file hosts (and their shadow roots) mount in the light tree as you scroll — catch
+  // them here and (re)adopt the sheet + re-run hunk enhancement.
+  new MutationObserver(queueEnhance).observe(target, { childList: true, subtree: true });
+  target.addEventListener("scroll", queueEnhance, { passive: true, capture: true });
+}
+
+function itemIdForElementPosition(element) {
+  const rect = element.getBoundingClientRect();
+  let best = null;
+  eachRoot(root => {
+    root.querySelectorAll(".gdiff-header-actions[data-item-id]").forEach(header => {
+      const headerRect = header.getBoundingClientRect();
+      if (headerRect.top <= rect.top + 1 && (!best || headerRect.top > best.top)) {
+        best = { top: headerRect.top, itemId: header.dataset.itemId };
+      }
+    });
+  });
+  return best ? best.itemId : null;
+}
+
+function enhanceHunkSeparators() {
+  eachRoot(root => {
+    let currentItemId = null;
+    root.querySelectorAll("*").forEach(node => {
+      if (node.classList && node.classList.contains("gdiff-header-actions") && node.dataset.itemId) {
+        currentItemId = node.dataset.itemId;
+      }
+      if (node.dataset && node.dataset.gdiffHunkEnhanced) return;
+      const text = (node.textContent || "").trim();
+      if (!/^\\d+ unmodified lines?$/.test(text)) return;
+      if (Array.from(node.children).some(child => /^\\d+ unmodified lines?$/.test((child.textContent || "").trim()))) return;
+      const parent = node.parentElement;
+      if (parent && parent.querySelector(".gdiff-expand-hunk")) return;
+      node.dataset.gdiffHunkEnhanced = "1";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "gdiff-expand-hunk";
+      const itemId = currentItemId || itemIdForElementPosition(node);
+      const mode = itemContextMode(itemId);
+      button.dataset.itemId = itemId || "";
+      button.title = mode === "compact" ? "Show more context for this file" : mode === "more" ? "Show full file context for this file" : "Full context is already shown";
+      button.setAttribute("aria-label", button.title);
+      button.disabled = mode === "full" || !itemId;
+      button.style.display = "inline-flex";
+      button.style.alignItems = "center";
+      button.style.justifyContent = "center";
+      button.style.width = "28px";
+      button.style.height = "18px";
+      button.style.margin = "0 8px 0 0";
+      button.style.padding = "0";
+      button.style.border = "1px solid transparent";
+      button.style.borderRadius = "4px";
+      button.style.background = "transparent";
+      button.style.color = "var(--accent-fg)";
+      if (button.disabled) button.style.opacity = "0.4";
+      button.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span style="position:absolute;clip:rect(0 0 0 0);clip-path:inset(50%);height:1px;overflow:hidden;white-space:nowrap;width:1px;">Expand context</span>';
+      button.addEventListener("click", event => {
+        event.stopPropagation();
+        expandItemContext(button.dataset.itemId);
+      });
+      node.prepend(button);
+    });
+  });
+}
+
+function scheduleHunkEnhancement() {
+  adoptDiffStyles();
+  window.setTimeout(() => { adoptDiffStyles(); enhanceHunkSeparators(); }, 250);
+  window.setTimeout(() => { adoptDiffStyles(); enhanceHunkSeparators(); }, 900);
+}
+
+function syncContextToggle() {
+}
+
+function setFileViewed(itemId, viewed) {
+  if (viewed) viewedFiles.add(itemId);
+  else viewedFiles.delete(itemId);
+  saveViewedFiles();
+  const item = itemForId(itemId);
+  if (!item) return;
+  item.collapsed = viewedFiles.has(itemId);
+  item.version = (item.version || 0) + 1;
+  viewer.updateItem(item);
+  renderFileList();
+}
+
+function setActiveFile(itemId) {
+  if (activeItemId === itemId) return;
+  activeItemId = itemId;
+  renderFileList();
+}
+
+function scrollToItem(itemId) {
+  setActiveFile(itemId);
+  const top = viewer.getTopForItem(itemId);
+  if (typeof top === "number") {
+    window.scrollTo({ top, behavior: "smooth" });
+  }
+  viewer.scrollTo({ type: "item", id: itemId, align: "start", behavior: "auto" });
+}
+
+function openFileComment(itemId, anchor) {
+  const item = itemForId(itemId);
+  if (!item) return;
+  openComment({
+    kind: "file",
+    itemId: item.id,
+    file: item.fileDiff.name,
+    side: "file",
+    startLine: 0,
+    endLine: 0,
+    code: ""
+  }, anchor);
+}
+
+function itemForFileDiff(fileDiff) {
+  return baseItems.find(item => item.fileDiff === fileDiff || item.fileDiff.name === fileDiff.name);
+}
+
+function renderHeaderMetadata(...args) {
+  const fileDiff = args[0];
+  const context = args[args.length - 1];
+  const item = context && context.item ? context.item : itemForFileDiff(fileDiff);
+  if (!item) return null;
+  const fileComments = Array.from(comments.values()).filter(comment => comment.kind === "file" && comment.itemId === item.id).length;
+  const wrap = document.createElement("span");
+  wrap.className = "gdiff-header-actions";
+  wrap.dataset.itemId = item.id;
+  const label = document.createElement("label");
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = viewedFiles.has(item.id);
+  checkbox.addEventListener("click", event => event.stopPropagation());
+  checkbox.addEventListener("change", event => {
+    event.stopPropagation();
+    setFileViewed(item.id, checkbox.checked);
+  });
+  label.appendChild(checkbox);
+  label.appendChild(document.createTextNode("Viewed"));
+  const comment = document.createElement("button");
+  comment.type = "button";
+  comment.className = "gdiff-comment-button";
+  comment.title = fileComments ? fileComments + " file comments" : "Add file comment";
+  comment.setAttribute("aria-label", comment.title);
+  comment.dataset.itemId = item.id;
+  comment.dataset.count = String(fileComments);
+  comment.style.position = "relative";
+  comment.style.display = "inline-flex";
+  comment.style.alignItems = "center";
+  comment.style.justifyContent = "center";
+  comment.style.width = "28px";
+  comment.style.height = "26px";
+  comment.style.padding = "0";
+  comment.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3.5h10v7H7l-3.5 3v-3H3z"/></svg>' + (fileComments ? '<span style="position:absolute;top:-6px;right:-6px;display:grid;min-width:16px;height:16px;place-items:center;padding:0 4px;border-radius:999px;background:#0969da;color:#fff;font-size:10px;line-height:1;">' + fileComments + '</span>' : '');
+  comment.addEventListener("click", event => {
+    event.stopPropagation();
+    openFileComment(item.id, comment);
+  });
+  wrap.appendChild(label);
+  wrap.appendChild(comment);
+  return wrap;
+}
+
+loadComments();
+viewer.setup(document.getElementById("viewer"));
+observeDiffViewer();
+loadPatchView();
+document.getElementById("stats").innerHTML =
+  '<span class="stat-files">' + baseItems.length + ' files</span>' +
+  '<span class="stat-add">+$total_add</span>' +
+  '<span class="stat-del">−$total_del</span>';
+syncViewToggle();
+syncSidebarCollapsed();
+document.querySelectorAll("[data-diff-style]").forEach(button => {
+  button.addEventListener("click", () => setDiffStyle(button.dataset.diffStyle));
+});
+document.getElementById("sidebar-toggle-top").addEventListener("click", () => setSidebarCollapsed(!sidebarCollapsed));
+document.getElementById("sidebar-toggle-tree").addEventListener("click", () => setSidebarCollapsed(true));
+document.getElementById("file-search").addEventListener("input", event => {
+  fileFilter = event.target.value;
+  renderFileList();
+});
+document.getElementById("file-list").addEventListener("click", event => {
+  const folder = event.target.closest("[data-dir]");
+  if (folder) {
+    const dir = folder.dataset.dir;
+    if (collapsedDirs.has(dir)) collapsedDirs.delete(dir);
+    else collapsedDirs.add(dir);
+    saveCollapsedDirs();
+    renderFileList();
+    return;
+  }
+  const jump = event.target.closest("[data-file-jump]");
+  if (jump) {
+    scrollToItem(jump.dataset.fileJump);
+  }
+});
+document.getElementById("copy-comments").addEventListener("click", copyComments);
+document.getElementById("clear-comments").addEventListener("click", clearComments);
+
+// Stagger reveal is a one-time affair — drop the flag so filter re-renders don't re-animate.
+window.setTimeout(() => document.getElementById("file-list").classList.remove("is-initial"), 850);
+
+// Keyboard review flow: j/k step through changed files, v toggles "viewed" on the active file.
+function sortedItemIds() {
+  return baseItems.slice().sort((a, b) => a.fileDiff.name.localeCompare(b.fileDiff.name)).map(item => item.id);
+}
+function moveActiveFile(delta) {
+  const ids = sortedItemIds();
+  if (!ids.length) return;
+  const current = activeItemId && ids.includes(activeItemId) ? ids.indexOf(activeItemId) : -1;
+  const next = Math.max(0, Math.min(ids.length - 1, current + delta));
+  scrollToItem(ids[next]);
+}
+document.addEventListener("keydown", event => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const target = event.target;
+  const tag = target && target.tagName ? target.tagName : "";
+  const nonTextInput = ["checkbox", "radio", "button", "submit", "range"].includes((target && target.type ? target.type : "").toLowerCase());
+  const typing = tag === "TEXTAREA" || (target && target.isContentEditable) || (tag === "INPUT" && !nonTextInput);
+  if (typing) return;
+  if (event.key === "j") { event.preventDefault(); moveActiveFile(1); }
+  else if (event.key === "k") { event.preventDefault(); moveActiveFile(-1); }
+  else if (event.key === "v" && activeItemId) { event.preventDefault(); setFileViewed(activeItemId, !viewedFiles.has(activeItemId)); }
+  else if (event.key === "c" && activeItemId) { event.preventDefault(); openFileComment(activeItemId); }
+  else if (event.key === "t") { event.preventDefault(); applyTheme(!darkMode); }
+  else if (event.key === "?") { event.preventDefault(); toggleHelp(); }
+  else if (event.key === "Escape") { closeHelp(); }
+});
+
+document.getElementById("theme-toggle").addEventListener("click", () => applyTheme(!darkMode));
+document.getElementById("help-toggle").addEventListener("click", toggleHelp);
+document.getElementById("help-overlay").addEventListener("click", event => {
+  if (event.target.id === "help-overlay") closeHelp();
+});
+const unreviewedToggle = document.getElementById("unreviewed-only");
+unreviewedToggle.checked = showUnreviewedOnly;
+unreviewedToggle.addEventListener("change", () => {
+  showUnreviewedOnly = unreviewedToggle.checked;
+  localStorage.setItem(unreviewedStorageKey, showUnreviewedOnly ? "1" : "0");
+  renderFileList();
+});
+
+window.gdiffViewer = viewer;
+</script>
+</body>
+</html>
+EOF
 
 if [ "${GDIFF_OPEN:-1}" = "0" ]; then
   echo "Open: $out"
