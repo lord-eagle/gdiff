@@ -816,6 +816,7 @@ const sidebarStorageKey = "gdiff-sidebar-collapsed:" + location.pathname;
 const unreviewedStorageKey = "gdiff-unreviewed-only:" + location.pathname;
 const themeStorageKey = "gdiff-theme-mode:" + location.pathname;
 let diffStyle = localStorage.getItem(viewStorageKey) === "unified" ? "unified" : "split";
+const expandedItemModes = new Map();
 let viewedFiles = new Set(JSON.parse(localStorage.getItem(viewedStorageKey) || "[]"));
 let collapsedDirs = new Set(JSON.parse(localStorage.getItem(collapsedDirsStorageKey) || "[]"));
 let sidebarCollapsed = localStorage.getItem(sidebarStorageKey) === "1";
@@ -824,7 +825,6 @@ let darkMode = localStorage.getItem(themeStorageKey) === "dark";
 let fileFilter = "";
 let activeItemId = null;
 let itemVersionSeed = 0;
-const expandedItemModes = new Map();
 let currentTarget = null;
 let lastLineTarget = null;
 
@@ -913,15 +913,15 @@ function parseItems(mode) {
 function itemsForCurrentContext() {
   const compactItems = parseItems("compact");
   if (!expandedItemModes.size) return compactItems;
-  const moreItems = parseItems("more");
-  const fullItems = parseItems("full");
-  const moreById = new Map(moreItems.map(item => [item.id, item]));
-  const fullById = new Map(fullItems.map(item => [item.id, item]));
+  const byMode = {
+    more: null,
+    full: null
+  };
   return compactItems.map(item => {
     const mode = expandedItemModes.get(item.id);
-    if (mode === "full") return fullById.get(item.id) || item;
-    if (mode === "more") return moreById.get(item.id) || item;
-    return item;
+    if (!mode || mode === "compact") return item;
+    if (!byMode[mode]) byMode[mode] = new Map(parseItems(mode).map(expanded => [expanded.id, expanded]));
+    return byMode[mode].get(item.id) || item;
   });
 }
 
@@ -940,7 +940,9 @@ function loadPatchView(scrollItemId) {
   updateReviewCount();
   if (scrollItemId) {
     requestAnimationFrame(() => {
-      viewer.scrollTo({ type: "position", position: viewer.getTopForItem(scrollItemId) || 0, behavior: "smooth" });
+      const top = viewer.getTopForItem(scrollItemId);
+      if (typeof top === "number") window.scrollTo({ top, behavior: "smooth" });
+      viewer.scrollTo({ type: "item", id: scrollItemId, align: "start", behavior: "auto" });
     });
   }
   scheduleHunkEnhancement();
@@ -1574,14 +1576,14 @@ function enhanceHunkSeparators() {
       const parent = node.parentElement;
       if (parent && parent.querySelector(".gdiff-expand-hunk")) return;
       node.dataset.gdiffHunkEnhanced = "1";
+      const itemId = currentItemId || itemIdForElementPosition(node);
+      const mode = itemContextMode(itemId);
       const button = document.createElement("button");
       button.type = "button";
       button.className = "gdiff-expand-hunk";
-      const itemId = currentItemId || itemIdForElementPosition(node);
-      const mode = itemContextMode(itemId);
-      button.dataset.itemId = itemId || "";
-      button.title = mode === "compact" ? "Show more context for this file" : mode === "more" ? "Show full file context for this file" : "Full context is already shown";
+      button.title = mode === "compact" ? "Show more context here" : mode === "more" ? "Show full file context here" : "Full context is already shown";
       button.setAttribute("aria-label", button.title);
+      button.dataset.itemId = itemId || "";
       button.disabled = mode === "full" || !itemId;
       button.style.display = "inline-flex";
       button.style.alignItems = "center";
