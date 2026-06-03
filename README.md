@@ -53,18 +53,9 @@ The HTML view includes a searchable, collapsible file tree, side-by-side/stacked
 
 In the HTML diff view:
 
-- Click a code line to add or edit feedback for that exact line.
-- Drag across lines, or click one line and then shift-click another, to comment on a range.
-- Click the comment icon in a file header to leave file-level feedback.
-- Commented lines are highlighted and saved in that browser tab, so refreshes keep your notes.
-- Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent.
-
-## Review comments
-
-In the HTML diff view:
-
 - Click a **line number** (gutter) to add or edit feedback for that line. The code column stays selectable so you can still copy snippets.
 - Drag across line numbers, or click one and then shift-click another, to comment on a range.
+- Click the comment icon in a file header to leave file-level feedback.
 - Use **Delete** in the panel to remove a comment; clearing the textarea no longer deletes silently.
 - Commented lines are highlighted and stored in `localStorage` under a key derived from the repo path + diff args, so rerunning the same `gdiff` invocation restores your notes.
 - Click the **comment counter** in the floating bar to open the comment list. Each row shows file:line + feedback with an **Edit** / **Delete** button. Comments whose line no longer exists in the current diff (e.g. after the file changed between runs) are flagged **not in current diff** and can still be deleted from the list — no more orphaned counts.
