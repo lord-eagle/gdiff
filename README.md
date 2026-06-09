@@ -55,11 +55,12 @@ In the HTML diff view:
 
 - Click a **line number** (gutter) to add or edit feedback for that line. The code column stays selectable so you can still copy snippets.
 - Drag across line numbers, or click one and then shift-click another, to comment on a range.
-- Click the comment icon in a file header to leave file-level feedback.
-- Use **Delete** in the panel to remove a comment; clearing the textarea no longer deletes silently.
-- Commented lines are highlighted and stored in `localStorage` under a key derived from the repo path + diff args, so rerunning the same `gdiff` invocation restores your notes.
-- Click the **comment counter** in the floating bar to open the comment list. Each row shows file:line + feedback with an **Edit** / **Delete** button. Comments whose line no longer exists in the current diff (e.g. after the file changed between runs) are flagged **not in current diff** and can still be deleted from the list — no more orphaned counts.
-- Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent. Each comment carries its enclosing `@@ ... @@` hunk header and a few lines of context (the commented line is prefixed with `> `), so closing braces, blank lines, and other ambiguous targets stay actionable. If the browser blocks the clipboard API (common on `file://`), a fallback modal lets you copy manually.
+- Click the comment icon in a file header, or in the current-file controls at the top of the page, to leave file-level feedback.
+- Use the top current-file controls to keep the active file's **Viewed** toggle and file-comment button reachable while you scroll. The controls stay in sync with the file header controls, sidebar state, and the `v` / `c` keyboard shortcuts.
+- Comments are saved to `localStorage` immediately. When `python3` is available, `gdiff` also serves the HTML over `127.0.0.1` and persists comments to `.gdiff-review.json` at the repository root.
+- If `python3` is missing, the local server cannot start, or you open the generated HTML file directly, comments continue to work from `localStorage` only.
+- JSON comment records include `id`, `kind`, `itemId`, `file`, `side`, `line`, `startLine`, `endLine`, `code`, `comment`, `resolved`, and `resolution`. The `resolved` and `resolution` fields are preserved for downstream review workflows even though the current UI does not expose resolution controls yet.
+- Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent. If the browser blocks the clipboard API, a fallback modal lets you copy manually.
 
 ## Use it from Soloterm
 
