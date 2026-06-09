@@ -80,12 +80,22 @@ if [ "$mode" = "unified" ]; then
   exit 0
 fi
 
+repo_root="$(git rev-parse --show-toplevel)"
+repo_name="$(basename "$repo_root")"
+git_dir="$(git rev-parse --git-dir)"
+case "$git_dir" in
+  /*) ;;
+  *) git_dir="$repo_root/$git_dir" ;;
+esac
+out_dir="$git_dir/gdiff"
+mkdir -p "$out_dir"
+
 tmp_dir="$(mktemp -d -t gdiff.XXXXXX)"
-out="$tmp_dir/diff.html"
+out="$out_dir/diff.html"
 patch_file="$tmp_dir/diff.patch"
 patch_more_file="$tmp_dir/diff.more.patch"
 patch_full_file="$tmp_dir/diff.full.patch"
-trap 'rm -f "$patch_file" "$patch_more_file" "$patch_full_file"' EXIT
+trap 'rm -rf "$tmp_dir"' EXIT
 
 collect_diff never >"$patch_file"
 if [ ! -s "$patch_file" ]; then
@@ -95,10 +105,11 @@ fi
 collect_diff never 20 >"$patch_more_file"
 collect_diff never 999999 >"$patch_full_file"
 review_context_id="$(git hash-object "$patch_file")"
-
-repo_root="$(git rev-parse --show-toplevel)"
-repo_name="$(basename "$repo_root")"
-review_state_path="$repo_root/.gdiff-review.json"
+repo_identity_source="$(git config --get remote.origin.url || true)"
+if [ -z "$repo_identity_source" ]; then
+  repo_identity_source="$repo_root"
+fi
+repo_storage_id="$(printf '%s' "$repo_identity_source" | git hash-object --stdin)"
 title="gdiff — $repo_name"
 patch_bytes="$(wc -c <"$patch_file" | tr -d '[:space:]')"
 
@@ -826,20 +837,17 @@ const patchPayloads = {
 let baseItems = [];
 const comments = new Map();
 const reviewContextId = "$review_context_id";
-const reviewStateEndpoint = location.protocol === "http:" || location.protocol === "https:" ? "/gdiff-review-state" : "";
-let reviewStateAvailable = false;
-let reviewState = null;
-let pendingReviewSave = Promise.resolve();
-const storageKey = "gdiff-review-comments:" + location.pathname;
-const viewStorageKey = "gdiff-view-style:" + location.pathname;
-const viewedStorageKey = "gdiff-viewed-files:" + location.pathname;
-const collapsedDirsStorageKey = "gdiff-collapsed-dirs:" + location.pathname;
-const sidebarStorageKey = "gdiff-sidebar-collapsed:" + location.pathname;
-const unreviewedStorageKey = "gdiff-unreviewed-only:" + location.pathname;
-const themeStorageKey = "gdiff-theme-mode:" + location.pathname;
+const repoStorageId = "$repo_storage_id";
+const storageScope = repoStorageId || location.pathname;
+const storageKey = "gdiff-review-comments:v2:" + storageScope + ":" + reviewContextId;
+const viewStorageKey = "gdiff-view-style:" + storageScope;
+const viewedStorageKey = "gdiff-viewed-files:v2:" + storageScope;
+const collapsedDirsStorageKey = "gdiff-collapsed-dirs:" + storageScope;
+const sidebarStorageKey = "gdiff-sidebar-collapsed:" + storageScope;
+const unreviewedStorageKey = "gdiff-unreviewed-only:" + storageScope;
+const themeStorageKey = "gdiff-theme-mode:" + storageScope;
 let diffStyle = localStorage.getItem(viewStorageKey) === "unified" ? "unified" : "split";
 const expandedItemModes = new Map();
-let viewedFiles = new Set(JSON.parse(localStorage.getItem(viewedStorageKey) || "[]"));
 let collapsedDirs = new Set(JSON.parse(localStorage.getItem(collapsedDirsStorageKey) || "[]"));
 let sidebarCollapsed = localStorage.getItem(sidebarStorageKey) === "1";
 let showUnreviewedOnly = localStorage.getItem(unreviewedStorageKey) === "1";
@@ -894,8 +902,51 @@ function itemIdForFile(fileDiff, patchIndex, fileIndex) {
   return patchIndex + ":" + fileIndex + ":" + fileDiff.name;
 }
 
+function stableStringify(value) {
+  if (value == null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]";
+  return "{" + Object.keys(value).sort().map(key => JSON.stringify(key) + ":" + stableStringify(value[key])).join(",") + "}";
+}
+
+function hashString(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function diffHashForFile(fileDiff) {
+  return hashString(stableStringify(fileDiff));
+}
+
+function reviewKeyForFile(fileDiff) {
+  return String(fileDiff.name || "");
+}
+
+function loadViewedFiles() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(viewedStorageKey) || "{}");
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return new Map();
+    return new Map(Object.entries(stored).filter(([, entry]) =>
+      entry && typeof entry === "object" && typeof entry.diffHash === "string"
+    ));
+  } catch {
+    return new Map();
+  }
+}
+
+let viewedFiles = loadViewedFiles();
+
+function isFileViewed(item) {
+  if (!item) return false;
+  const entry = viewedFiles.get(item.reviewKey);
+  return Boolean(entry && entry.diffHash === item.diffHash);
+}
+
 function saveViewedFiles() {
-  localStorage.setItem(viewedStorageKey, JSON.stringify(Array.from(viewedFiles)));
+  localStorage.setItem(viewedStorageKey, JSON.stringify(Object.fromEntries(viewedFiles)));
 }
 
 function saveCollapsedDirs() {
@@ -922,10 +973,12 @@ function parseItems(mode) {
         id: itemId,
         type: "diff",
         fileDiff,
+        reviewKey: reviewKeyForFile(fileDiff),
+        diffHash: diffHashForFile(fileDiff),
         annotations: [],
         version: itemVersionSeed
       };
-      if (viewedFiles.has(itemId)) item.collapsed = true;
+      if (isFileViewed(item)) item.collapsed = true;
       item.annotations = annotationsForItem(item);
       return item;
     })
@@ -943,7 +996,11 @@ function itemsForCurrentContext() {
     const mode = expandedItemModes.get(item.id);
     if (!mode || mode === "compact") return item;
     if (!byMode[mode]) byMode[mode] = new Map(parseItems(mode).map(expanded => [expanded.id, expanded]));
-    return byMode[mode].get(item.id) || item;
+    const expanded = byMode[mode].get(item.id) || item;
+    expanded.reviewKey = item.reviewKey;
+    expanded.diffHash = item.diffHash;
+    expanded.collapsed = isFileViewed(expanded);
+    return expanded;
   });
 }
 
@@ -1008,72 +1065,17 @@ function localComments() {
   }
 }
 
-function commentsFromReviewState(state) {
-  if (!state || typeof state !== "object") return [];
-  const context = state.contexts && state.contexts[reviewContextId];
-  if (context && Array.isArray(context.comments)) return context.comments;
-  if (!state.contexts && Array.isArray(state.comments)) return state.comments;
-  if (state.currentContext === reviewContextId && Array.isArray(state.comments)) return state.comments;
-  return [];
-}
-
 async function loadComments() {
   comments.clear();
-  const local = localComments();
-  mergeComments(local);
-  if (!reviewStateEndpoint) return;
-  try {
-    const response = await fetch(reviewStateEndpoint, { cache: "no-store" });
-    if (!response.ok) return;
-    reviewState = await response.json();
-    reviewStateAvailable = true;
-    mergeComments(commentsFromReviewState(reviewState));
-    saveLocalComments();
-    if (local.length) persistComments();
-  } catch {
-    reviewStateAvailable = false;
-  }
+  mergeComments(localComments());
 }
 
 function saveLocalComments() {
   localStorage.setItem(storageKey, JSON.stringify(serializedComments()));
 }
 
-function buildReviewStatePayload() {
-  const commentsList = serializedComments();
-  const nextState = reviewState && typeof reviewState === "object" && !Array.isArray(reviewState) ? { ...reviewState } : {};
-  nextState.version = 1;
-  nextState.currentContext = reviewContextId;
-  nextState.updatedAt = new Date().toISOString();
-  nextState.contexts = nextState.contexts && typeof nextState.contexts === "object" && !Array.isArray(nextState.contexts) ? { ...nextState.contexts } : {};
-  nextState.contexts[reviewContextId] = {
-    updatedAt: nextState.updatedAt,
-    comments: commentsList
-  };
-  nextState.comments = commentsList;
-  return nextState;
-}
-
-function persistComments() {
-  if (!reviewStateAvailable || !reviewStateEndpoint) return;
-  const payload = buildReviewStatePayload();
-  reviewState = payload;
-  pendingReviewSave = pendingReviewSave.catch(() => {}).then(() =>
-    fetch(reviewStateEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    }).then(response => {
-      if (!response.ok) throw new Error("Unable to persist review state");
-    }).catch(() => {
-      reviewStateAvailable = false;
-    })
-  );
-}
-
 function saveComments() {
   saveLocalComments();
-  persistComments();
 }
 
 function itemForId(itemId) {
@@ -1106,7 +1108,7 @@ function updateProgress() {
   const el = document.getElementById("tree-progress");
   if (!el) return;
   let viewed = 0;
-  for (const item of baseItems) if (viewedFiles.has(item.id)) viewed += 1;
+  for (const item of baseItems) if (isFileViewed(item)) viewed += 1;
   el.innerHTML = "<b>" + viewed + "</b> / " + baseItems.length + " viewed";
 }
 
@@ -1116,7 +1118,7 @@ function renderFileList() {
   const dirCounts = new Map();
   const items = baseItems
     .filter(item => !filter || item.fileDiff.name.toLowerCase().includes(filter))
-    .filter(item => !showUnreviewedOnly || !viewedFiles.has(item.id))
+    .filter(item => !showUnreviewedOnly || !isFileViewed(item))
     .slice()
     .sort((a, b) => a.fileDiff.name.localeCompare(b.fileDiff.name));
   for (const item of items) {
@@ -1149,7 +1151,7 @@ function renderFileList() {
       }
     }
     if (hiddenByCollapsedDir) continue;
-    const viewedClass = viewedFiles.has(item.id) ? " is-viewed" : "";
+    const viewedClass = isFileViewed(item) ? " is-viewed" : "";
     const activeClass = item.id === activeItemId ? " is-active" : "";
     const stat = fileStat(item.fileDiff);
     const glyph = fileStatusGlyph(item.fileDiff, stat);
@@ -1738,12 +1740,19 @@ function syncContextToggle() {
 }
 
 function setFileViewed(itemId, viewed) {
-  if (viewed) viewedFiles.add(itemId);
-  else viewedFiles.delete(itemId);
-  saveViewedFiles();
   const item = itemForId(itemId);
   if (!item) return;
-  item.collapsed = viewedFiles.has(itemId);
+  if (viewed) {
+    viewedFiles.set(item.reviewKey, {
+      path: item.fileDiff.name,
+      diffHash: item.diffHash,
+      reviewedAt: new Date().toISOString()
+    });
+  } else {
+    viewedFiles.delete(item.reviewKey);
+  }
+  saveViewedFiles();
+  item.collapsed = isFileViewed(item);
   item.version = (item.version || 0) + 1;
   viewer.updateItem(item);
   renderFileList();
@@ -1818,7 +1827,7 @@ function renderHeaderMetadata(...args) {
   const label = document.createElement("label");
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
-  checkbox.checked = viewedFiles.has(item.id);
+  checkbox.checked = isFileViewed(item);
   checkbox.addEventListener("click", event => event.stopPropagation());
   checkbox.addEventListener("change", event => {
     event.stopPropagation();
@@ -1911,7 +1920,7 @@ document.addEventListener("keydown", event => {
   if (typing) return;
   if (event.key === "ArrowDown" || event.key === "n") { event.preventDefault(); moveActiveFile(1); }
   else if (event.key === "ArrowUp" || event.key === "p") { event.preventDefault(); moveActiveFile(-1); }
-  else if (event.key === "v" && activeItemId) { event.preventDefault(); setFileViewed(activeItemId, !viewedFiles.has(activeItemId)); }
+  else if (event.key === "v" && activeItemId) { event.preventDefault(); setFileViewed(activeItemId, !isFileViewed(itemForId(activeItemId))); }
   else if (event.key === "c" && activeItemId) { event.preventDefault(); openFileComment(activeItemId); }
   else if (event.key === "?") { event.preventDefault(); toggleHelp(); }
   else if (event.key === "Escape") { closeHelp(); }
@@ -1936,122 +1945,8 @@ window.gdiffViewer = viewer;
 </html>
 EOF
 
-serve_url=""
-server_pid=""
-if command -v python3 >/dev/null 2>&1; then
-  server_script="$tmp_dir/server.py"
-  ready_file="$tmp_dir/server.ready"
-  server_log="$tmp_dir/server.log"
-  cat >"$server_script" <<'PY'
-import json
-import os
-import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from urllib.parse import urlparse
-
-html_path = Path(sys.argv[1])
-state_path = Path(sys.argv[2])
-ready_path = Path(sys.argv[3])
-
-EMPTY_STATE = {"version": 1, "comments": []}
-
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        return
-
-    def send_json(self, status, payload):
-        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self):
-        path = urlparse(self.path).path
-        if path == "/gdiff-review-state":
-            if not state_path.exists():
-                self.send_json(200, EMPTY_STATE)
-                return
-            try:
-                data = state_path.read_bytes()
-                json.loads(data.decode("utf-8"))
-            except Exception:
-                self.send_json(200, EMPTY_STATE)
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(data)
-            return
-        if path not in ("/", "/diff.html"):
-            self.send_error(404)
-            return
-        data = html_path.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_POST(self):
-        if urlparse(self.path).path != "/gdiff-review-state":
-            self.send_error(404)
-            return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = self.rfile.read(length)
-            parsed = json.loads(payload.decode("utf-8"))
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = state_path.with_name(state_path.name + ".tmp")
-            tmp_path.write_text(json.dumps(parsed, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            os.replace(tmp_path, state_path)
-        except Exception as error:
-            self.send_json(400, {"error": str(error)})
-            return
-        self.send_json(200, {"ok": True})
-
-
-server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-ready_path.write_text(f"http://127.0.0.1:{server.server_port}/diff.html\n", encoding="utf-8")
-server.serve_forever()
-PY
-  python3 "$server_script" "$out" "$review_state_path" "$ready_file" >"$server_log" 2>&1 &
-  server_pid="$!"
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if [ -s "$ready_file" ]; then
-      serve_url="$(cat "$ready_file")"
-      break
-    fi
-    if ! kill -0 "$server_pid" 2>/dev/null; then
-      server_pid=""
-      break
-    fi
-    sleep 0.1
-  done
-fi
-
 if [ "${GDIFF_OPEN:-1}" = "0" ]; then
-  if [ -n "$serve_url" ]; then
-    echo "Open: $serve_url"
-  else
-    echo "Open: $out"
-  fi
-  exit 0
-fi
-
-if [ -n "$serve_url" ]; then
-  case "$(uname -s)" in
-    Darwin) open "$serve_url" ;;
-    Linux)  xdg-open "$serve_url" >/dev/null 2>&1 || echo "Open: $serve_url" ;;
-    *)      echo "Open: $serve_url" ;;
-  esac
+  echo "Open: $out"
   exit 0
 fi
 
