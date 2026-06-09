@@ -42,7 +42,7 @@ ln -s "$PWD/gdiff/bin/gdiff" ~/.local/bin/gdiff
 
 - Runs `git diff` (working tree + staged, or against the refs you pass).
 - Streams the unified diff into a temp patch file.
-- Writes an HTML app to a temp dir and opens it in your default browser.
+- Writes a static HTML app to `.git/gdiff/diff.html` and opens it in your default browser.
 - The app parses and renders the patch with [`@pierre/diffs`](https://diffs.com/docs).
 
 The HTML view uses Diffs' `CodeView`, which handles virtualized file rendering, row/window measurement, scroll reconciliation, and syntax highlighting.
@@ -57,9 +57,8 @@ In the HTML diff view:
 - Drag across line numbers, or click one and then shift-click another, to comment on a range.
 - Click the comment icon in a file header to leave file-level feedback.
 - Each file header sticks while you scroll through that file, keeping its **Viewed** toggle and file-comment button reachable. The header controls stay in sync with sidebar state and the `v` / `c` keyboard shortcuts.
-- Comments are saved to `localStorage` immediately. When `python3` is available, `gdiff` also serves the HTML over `127.0.0.1` and persists comments to `.gdiff-review.json` at the repository root.
-- If `python3` is missing, the local server cannot start, or you open the generated HTML file directly, comments continue to work from `localStorage` only.
-- JSON comment records include `id`, `kind`, `itemId`, `file`, `side`, `line`, `startLine`, `endLine`, `code`, `comment`, `resolved`, and `resolution`. The `resolved` and `resolution` fields are preserved for downstream review workflows even though the current UI does not expose resolution controls yet.
+- Comments are saved to browser `localStorage` only. `gdiff` does not run a local server or write repository review-state JSON.
+- Viewed file state is also saved to `localStorage`, scoped by repository and file path. A file is restored as viewed only when its saved per-file diff hash matches the current diff, so changed or newly added files start unviewed until explicitly marked again.
 - Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent. If the browser blocks the clipboard API, a fallback modal lets you copy manually.
 
 ## Use it from Soloterm
