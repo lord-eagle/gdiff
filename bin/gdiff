@@ -223,74 +223,6 @@ cat >"$out" <<EOF
     font-family: var(--mono);
   }
   .top-actions { display: flex; gap: 12px; align-items: center; }
-  .current-file-controls {
-    flex: 1;
-    min-width: 180px;
-    display: flex;
-    justify-content: center;
-    overflow: hidden;
-  }
-  .current-file-card {
-    width: min(620px, 100%);
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    gap: 8px;
-    align-items: center;
-    padding: 5px 6px 5px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--panel);
-  }
-  .current-file-name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font: 12px var(--mono);
-    color: var(--fg);
-  }
-  .current-file-viewed {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    color: var(--muted);
-    font-size: 12px;
-    white-space: nowrap;
-    cursor: pointer;
-    user-select: none;
-  }
-  .current-file-viewed input {
-    margin: 0;
-    accent-color: var(--accent-emphasis);
-  }
-  .current-file-comment {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 30px;
-    height: 28px;
-    padding: 0;
-    color: var(--muted);
-  }
-  .current-file-comment svg { width: 16px; height: 16px; }
-  .current-file-comment span {
-    position: absolute;
-    top: -6px;
-    right: -6px;
-    display: none;
-    min-width: 16px;
-    height: 16px;
-    place-items: center;
-    padding: 0 4px;
-    border-radius: 999px;
-    background: var(--accent-emphasis);
-    color: #fff;
-    font-size: 10px;
-    line-height: 1;
-  }
-  .current-file-comment[data-count]:not([data-count="0"]) { color: var(--accent-fg); }
-  .current-file-comment[data-count]:not([data-count="0"]) span { display: grid; }
   .stats { color: var(--muted); font-size: 12px; white-space: nowrap; }
   .stats .stat-add { color: var(--success-fg); font-weight: 600; }
   .stats .stat-del { color: var(--danger-fg); font-weight: 600; margin-inline-start: 6px; }
@@ -317,7 +249,8 @@ cat >"$out" <<EOF
   .app-shell {
     display: grid;
     grid-template-columns: 300px minmax(0, 1fr);
-    min-height: calc(100vh - 52px);
+    height: calc(100vh - 52px);
+    min-height: 0;
   }
   .app-shell.is-sidebar-collapsed {
     grid-template-columns: 0 minmax(0, 1fr);
@@ -437,20 +370,24 @@ cat >"$out" <<EOF
   .file-tree-stat.is-del { color: var(--danger-fg); margin-inline-start: 4px; }
   .file-tree-count { margin-left: auto; color: var(--muted); font-size: 12px; }
   .file-tree-empty { padding: 10px 8px; color: var(--muted); font-size: 12px; }
-  #viewer { min-width: 0; min-height: calc(100vh - 52px); }
+  #viewer {
+    min-width: 0;
+    min-height: 0;
+    height: calc(100vh - 52px);
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
   @media (max-width: 900px) {
     .topbar { flex-wrap: wrap; align-items: stretch; }
     .top-left { flex: 1 1 auto; }
-    .current-file-controls { order: 3; flex: 1 0 100%; justify-content: stretch; }
     .top-actions { flex: none; }
-    .app-shell { grid-template-columns: 1fr; }
+    .app-shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
     .file-tree { position: static; height: auto; max-height: 220px; border-right: 0; border-bottom: 1px solid var(--border); }
   }
   @media (max-width: 560px) {
     .top-actions { width: 100%; justify-content: space-between; gap: 6px; }
     .view-toggle button { padding: 4px 6px; }
     .stats { display: none; }
-    .current-file-card { grid-template-columns: minmax(0, 1fr) auto auto; }
   }
   .review-bar {
     position: fixed;
@@ -725,13 +662,12 @@ cat >"$out" <<EOF
     </button>
     <div class="title"><span class="wordmark">gdiff</span><span class="title-repo">$repo_name</span></div>
   </div>
-  <div class="current-file-controls" id="current-file-controls" aria-live="polite"></div>
   <div class="top-actions">
     <div class="view-toggle" aria-label="Diff view">
       <button type="button" id="view-split" data-diff-style="split">Side by side</button>
       <button type="button" id="view-unified" data-diff-style="unified">Stacked</button>
     </div>
-    <button type="button" id="theme-toggle" class="icon-btn" title="Toggle light / dark (t)" aria-label="Toggle light or dark theme">
+    <button type="button" id="theme-toggle" class="icon-btn" title="Toggle light / dark" aria-label="Toggle light or dark theme">
       <svg class="moon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6 1.6a6.4 6.4 0 1 0 8.4 8.4A5 5 0 1 1 6 1.6z"/></svg>
       <svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M12.8 3.2l-1.4 1.4M4.6 11.4l-1.4 1.4" stroke-linecap="round"/></svg>
     </button>
@@ -762,10 +698,9 @@ cat >"$out" <<EOF
   <div class="help-card" role="dialog" aria-label="Keyboard shortcuts">
     <h2>Review shortcuts</h2>
     <p>gdiff — Atelier</p>
-    <div class="help-row"><span>Next / previous file</span><span><kbd>j</kbd> <kbd>k</kbd></span></div>
+    <div class="help-row"><span>Next / previous file</span><span><kbd>↓</kbd> <kbd>↑</kbd> <kbd>n</kbd> <kbd>p</kbd></span></div>
     <div class="help-row"><span>Toggle "viewed" on active file</span><kbd>v</kbd></div>
     <div class="help-row"><span>Comment on active file</span><kbd>c</kbd></div>
-    <div class="help-row"><span>Toggle light / dark</span><kbd>t</kbd></div>
     <div class="help-row"><span>Show / hide this help</span><kbd>?</kbd></div>
   </div>
 </div>
@@ -1017,19 +952,19 @@ function loadPatchView(scrollItemId) {
   const previousTarget = currentTarget;
   baseItems = itemsForCurrentContext();
   currentTarget = previousTarget && baseItems.some(item => item.id === previousTarget.itemId) ? previousTarget : null;
+  if (!activeItemId || !baseItems.some(item => item.id === activeItemId)) {
+    activeItemId = baseItems[0]?.id || null;
+  }
   if (currentTarget) {
     const item = baseItems.find(item => item.id === currentTarget.itemId);
     if (item) item.annotations = annotationsForItem(item);
   }
   viewer.setItems(baseItems);
   renderFileList();
-  renderCurrentFileControls();
   syncContextToggle();
   updateReviewCount();
   if (scrollItemId) {
     requestAnimationFrame(() => {
-      const top = viewer.getTopForItem(scrollItemId);
-      if (typeof top === "number") window.scrollTo({ top, behavior: "smooth" });
       viewer.scrollTo({ type: "item", id: scrollItemId, align: "start", behavior: "auto" });
     });
   }
@@ -1447,7 +1382,6 @@ function saveCurrentComment(rawValue) {
   }
   updateReviewCount();
   renderFileList();
-  renderCurrentFileControls();
   closePanel();
 }
 
@@ -1506,7 +1440,6 @@ function clearComments() {
   saveComments();
   refreshAnnotations();
   renderFileList();
-  renderCurrentFileControls();
   closePanel();
 }
 
@@ -1670,6 +1603,10 @@ function eachRoot(callback) {
 // it once per root is enough — virtualized rows mounted later in that root inherit it.
 const diffThemeCss = [
   ".gdiff-annotation{display:inline-flex;align-items:center;gap:4px;margin-inline-start:6px;padding:1px 8px;border-radius:999px;background:var(--accent-subtle);color:var(--accent-fg);font:11px -apple-system,BlinkMacSystemFont,sans-serif;}",
+  "[data-diffs-header]{background:var(--bg);border-bottom:1px solid var(--border);box-shadow:0 1px 0 var(--border-muted);z-index:3;}",
+  "[data-diffs-header][data-sticky]{position:sticky;top:0;}",
+  "[data-header-content],[data-metadata]{min-width:0;}",
+  "[data-metadata]{display:flex;align-items:center;gap:8px;}",
   ".gdiff-header-actions{display:inline-flex;gap:8px;align-items:center;margin-inline-start:8px;}",
   ".gdiff-header-actions label{display:inline-flex;gap:4px;align-items:center;color:var(--muted);font:12px -apple-system,BlinkMacSystemFont,sans-serif;cursor:pointer;}",
   ".gdiff-comment-button{position:relative;display:inline-flex;align-items:center;justify-content:center;width:28px;height:26px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;}",
@@ -1810,22 +1747,16 @@ function setFileViewed(itemId, viewed) {
   item.version = (item.version || 0) + 1;
   viewer.updateItem(item);
   renderFileList();
-  renderCurrentFileControls();
 }
 
 function setActiveFile(itemId) {
   if (activeItemId === itemId) return;
   activeItemId = itemId;
   renderFileList();
-  renderCurrentFileControls();
 }
 
 function scrollToItem(itemId) {
   setActiveFile(itemId);
-  const top = viewer.getTopForItem(itemId);
-  if (typeof top === "number") {
-    window.scrollTo({ top, behavior: "smooth" });
-  }
   viewer.scrollTo({ type: "item", id: itemId, align: "start", behavior: "auto" });
 }
 
@@ -1851,40 +1782,12 @@ function fileCommentCountForItem(itemId) {
   return count;
 }
 
-function renderCurrentFileControls() {
-  const root = document.getElementById("current-file-controls");
-  if (!root) return;
-  const item = itemForId(activeItemId) || baseItems[0];
-  if (!item) {
-    root.innerHTML = "";
-    return;
-  }
-  if (activeItemId !== item.id) activeItemId = item.id;
-  const viewed = viewedFiles.has(item.id);
-  const fileComments = fileCommentCountForItem(item.id);
-  const commentTitle = fileComments ? fileComments + " file comments" : "Add file comment";
-  root.innerHTML =
-    '<div class="current-file-card">' +
-    '<span class="current-file-name" title="' + escapeHtml(item.fileDiff.name) + '">' + escapeHtml(item.fileDiff.name) + '</span>' +
-    '<label class="current-file-viewed"><input type="checkbox" data-current-viewed' + (viewed ? ' checked' : '') + '> Viewed</label>' +
-    '<button type="button" class="current-file-comment" data-current-comment data-count="' + fileComments + '" title="' + commentTitle + '" aria-label="' + commentTitle + '">' +
-    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3.5h10v7H7l-3.5 3v-3H3z"/></svg>' +
-    '<span>' + fileComments + '</span>' +
-    '</button>' +
-    '</div>';
-  root.querySelector("[data-current-viewed]").addEventListener("change", event => {
-    setFileViewed(item.id, event.target.checked);
-  });
-  root.querySelector("[data-current-comment]").addEventListener("click", event => {
-    openFileComment(item.id, event.currentTarget);
-  });
-}
-
 let activeFileScrollQueued = false;
 function updateActiveFileFromScroll() {
   activeFileScrollQueued = false;
   if (!baseItems.length || !viewer || typeof viewer.getTopForItem !== "function") return;
-  const marker = window.scrollY + 72;
+  const viewerRoot = document.getElementById("viewer");
+  const marker = (viewerRoot ? viewerRoot.scrollTop : 0) + 56;
   let current = baseItems[0];
   for (const item of baseItems) {
     const top = viewer.getTopForItem(item.id);
@@ -1951,7 +1854,6 @@ await loadComments();
 viewer.setup(document.getElementById("viewer"));
 observeDiffViewer();
 loadPatchView();
-window.addEventListener("scroll", scheduleActiveFileFromScroll, { passive: true });
 document.getElementById("viewer").addEventListener("scroll", scheduleActiveFileFromScroll, { passive: true, capture: true });
 document.getElementById("stats").innerHTML =
   '<span class="stat-files">' + baseItems.length + ' files</span>' +
@@ -1989,7 +1891,7 @@ document.getElementById("clear-comments").addEventListener("click", clearComment
 // Stagger reveal is a one-time affair — drop the flag so filter re-renders don't re-animate.
 window.setTimeout(() => document.getElementById("file-list").classList.remove("is-initial"), 850);
 
-// Keyboard review flow: j/k step through changed files, v toggles "viewed" on the active file.
+// Keyboard review flow: arrows and n/p step through changed files, v toggles "viewed" on the active file.
 function sortedItemIds() {
   return baseItems.slice().sort((a, b) => a.fileDiff.name.localeCompare(b.fileDiff.name)).map(item => item.id);
 }
@@ -2007,11 +1909,10 @@ document.addEventListener("keydown", event => {
   const nonTextInput = ["checkbox", "radio", "button", "submit", "range"].includes((target && target.type ? target.type : "").toLowerCase());
   const typing = tag === "TEXTAREA" || (target && target.isContentEditable) || (tag === "INPUT" && !nonTextInput);
   if (typing) return;
-  if (event.key === "j") { event.preventDefault(); moveActiveFile(1); }
-  else if (event.key === "k") { event.preventDefault(); moveActiveFile(-1); }
+  if (event.key === "ArrowDown" || event.key === "n") { event.preventDefault(); moveActiveFile(1); }
+  else if (event.key === "ArrowUp" || event.key === "p") { event.preventDefault(); moveActiveFile(-1); }
   else if (event.key === "v" && activeItemId) { event.preventDefault(); setFileViewed(activeItemId, !viewedFiles.has(activeItemId)); }
   else if (event.key === "c" && activeItemId) { event.preventDefault(); openFileComment(activeItemId); }
-  else if (event.key === "t") { event.preventDefault(); applyTheme(!darkMode); }
   else if (event.key === "?") { event.preventDefault(); toggleHelp(); }
   else if (event.key === "Escape") { closeHelp(); }
 });
