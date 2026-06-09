@@ -416,8 +416,86 @@ cat >"$out" <<EOF
     color: var(--fg);
     font-size: 13px;
   }
-  .review-bar .review-count-label { color: var(--muted); }
-  .review-bar #review-count { font-weight: 600; color: var(--fg); }
+  .review-count-label {
+    border-color: transparent;
+    background: transparent;
+    color: var(--muted);
+    padding: 6px 8px;
+  }
+  .review-count-label:hover { background: var(--panel-hover); color: var(--fg); }
+  .review-count-label #review-count { font-weight: 600; color: var(--fg); }
+  .gdiff-comment-list {
+    position: fixed;
+    right: 16px;
+    bottom: 72px;
+    z-index: 31;
+    width: min(420px, calc(100vw - 32px));
+    max-height: min(60vh, 520px);
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--overlay-shadow);
+    font-size: 13px;
+  }
+  .gdiff-comment-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .gdiff-comment-list-body {
+    padding: 8px;
+    overflow-y: auto;
+  }
+  .gdiff-comment-list-empty {
+    margin: 0;
+    padding: 8px;
+    color: var(--muted);
+  }
+  .gdiff-comment-row {
+    padding: 8px;
+    border-radius: 6px;
+  }
+  .gdiff-comment-row + .gdiff-comment-row {
+    margin-top: 6px;
+    border-top: 1px solid var(--border-muted);
+    padding-top: 8px;
+  }
+  .gdiff-comment-orphan { background: var(--attention-bg); }
+  .gdiff-comment-row-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .gdiff-comment-row-target {
+    font: 12px var(--mono);
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .gdiff-orphan-badge {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--attention-bg);
+    color: var(--attention-fg);
+    border: 1px solid rgba(180, 83, 9, 0.35);
+  }
+  .gdiff-comment-row-feedback {
+    margin: 6px 0 8px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .gdiff-comment-row-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
   button {
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -701,7 +779,7 @@ cat >"$out" <<EOF
   <main id="viewer"></main>
 </div>
 <div class="review-bar">
-  <span class="review-count-label"><span id="review-count">0</span> <span id="review-noun">comments</span></span>
+  <button type="button" id="review-count-button" class="review-count-label" title="Show all stored comments"><span id="review-count">0</span> <span id="review-noun">comments</span></button>
   <button type="button" id="copy-comments" class="primary">Copy prompt</button>
   <button type="button" id="clear-comments">Clear</button>
 </div>
@@ -834,6 +912,7 @@ const patchPayloads = {
   more: decodeBase64Utf8(document.getElementById("patch-more-data").textContent),
   full: decodeBase64Utf8(document.getElementById("patch-full-data").textContent)
 };
+const CONTEXT_LINES = 3;
 let baseItems = [];
 const comments = new Map();
 const reviewContextId = "$review_context_id";
@@ -1082,6 +1161,103 @@ function itemForId(itemId) {
   return baseItems.find(item => item.id === itemId);
 }
 
+function stripPatchPath(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "/dev/null") return "";
+  return text.replace(/^[ab]\//, "");
+}
+
+function parsePromptHunks(rawPatch) {
+  const files = new Map();
+  let file = "";
+  let pendingOldFile = "";
+  let hunk = null;
+  let oldLine = 0;
+  let newLine = 0;
+  String(rawPatch || "").split(/\r?\n/).forEach(line => {
+    if (line.startsWith("diff --git ")) {
+      file = "";
+      pendingOldFile = "";
+      hunk = null;
+      return;
+    }
+    if (line.startsWith("--- ")) {
+      pendingOldFile = stripPatchPath(line.slice(4).split(/\t/)[0]);
+      return;
+    }
+    if (line.startsWith("+++ ")) {
+      file = stripPatchPath(line.slice(4).split(/\t/)[0]) || pendingOldFile;
+      if (file && !files.has(file)) files.set(file, []);
+      hunk = null;
+      return;
+    }
+    const match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@.*$/);
+    if (match) {
+      if (!file) return;
+      oldLine = Number(match[1]);
+      newLine = Number(match[2]);
+      hunk = { file, header: line, lines: [] };
+      files.get(file).push(hunk);
+      return;
+    }
+    if (!hunk || !line) return;
+    const marker = line[0];
+    const code = line.slice(1);
+    if (marker === " ") {
+      hunk.lines.push({ oldLine, newLine, code });
+      oldLine += 1;
+      newLine += 1;
+    } else if (marker === "+") {
+      hunk.lines.push({ oldLine: null, newLine, code });
+      newLine += 1;
+    } else if (marker === "-") {
+      hunk.lines.push({ oldLine, newLine: null, code });
+      oldLine += 1;
+    }
+  });
+  return files;
+}
+
+const promptHunks = parsePromptHunks(patchPayloads.full || patchPayloads.more || patchPayloads.compact);
+
+function lineNumberForSide(entry, side) {
+  return side === "old" ? entry.oldLine : entry.newLine;
+}
+
+function promptContextForComment(comment) {
+  if (!comment || comment.kind === "file") return null;
+  const side = comment.side === "old" ? "old" : "new";
+  const startLine = Number(comment.startLine || comment.line || 0);
+  const endLine = Number(comment.endLine || startLine);
+  const hunks = promptHunks.get(comment.file) || [];
+  for (const hunk of hunks) {
+    const sideLines = hunk.lines.filter(entry => lineNumberForSide(entry, side) != null);
+    const indexes = [];
+    sideLines.forEach((entry, index) => {
+      const line = lineNumberForSide(entry, side);
+      if (line >= startLine && line <= endLine) indexes.push(index);
+    });
+    if (!indexes.length) continue;
+    const first = indexes[0];
+    const last = indexes[indexes.length - 1];
+    return {
+      hunk: hunk.header,
+      before: sideLines.slice(Math.max(0, first - CONTEXT_LINES), first),
+      commented: sideLines.slice(first, last + 1),
+      after: sideLines.slice(last + 1, last + 1 + CONTEXT_LINES),
+      side
+    };
+  }
+  return null;
+}
+
+function commentHasCurrentAnchor(comment) {
+  if (!comment) return false;
+  if (!itemForId(comment.itemId)) return false;
+  if (comment.kind === "file") return true;
+  return Boolean(promptContextForComment(comment));
+}
+
 function fileStat(fileDiff) {
   const add = fileDiff.insertions ?? fileDiff.additions ?? fileDiff.added;
   const del = fileDiff.deletions ?? fileDiff.removed ?? fileDiff.deleted;
@@ -1178,7 +1354,7 @@ function escapeHtml(value) {
     "&": "&amp;",
     "<": "&lt;",
     ">": "&gt;",
-    "\\"": "&quot;"
+    "\"": "&quot;"
   })[char]);
 }
 
@@ -1213,6 +1389,8 @@ function updateReviewCount() {
   document.getElementById("review-count").textContent = String(n);
   const noun = document.getElementById("review-noun");
   if (noun) noun.textContent = n === 1 ? "comment" : "comments";
+  const button = document.getElementById("review-count-button");
+  if (button) button.title = n ? "Show all stored comments" : "Show comment list";
 }
 
 function refreshAnnotations(itemId) {
@@ -1355,6 +1533,146 @@ function closePanel() {
   if (previousItemId) refreshAnnotations(previousItemId);
 }
 
+function commentLabel(comment) {
+  if (comment.kind === "file") return (comment.file || "file") + " (file)";
+  const start = comment.startLine || comment.line || 0;
+  const end = comment.endLine || start;
+  const line = start === end ? String(start) : start + "-" + end;
+  return (comment.file || "file") + ":" + line;
+}
+
+function truncate(value, max) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > max ? text.slice(0, max - 1) + "..." : text;
+}
+
+function targetFromComment(comment) {
+  if (!comment) return null;
+  if (comment.kind === "file") {
+    return {
+      kind: "file",
+      itemId: comment.itemId,
+      file: comment.file,
+      side: "file",
+      startLine: 0,
+      endLine: 0,
+      code: ""
+    };
+  }
+  const context = promptContextForComment(comment);
+  const code = context && context.commented.length
+    ? context.commented.map(entry => entry.code).join("\n")
+    : comment.code;
+  return {
+    kind: "line",
+    itemId: comment.itemId,
+    file: comment.file,
+    side: comment.side,
+    startLine: comment.startLine || comment.line,
+    endLine: comment.endLine || comment.startLine || comment.line,
+    code
+  };
+}
+
+function deleteComment(id) {
+  const comment = comments.get(id);
+  comments.delete(id);
+  saveComments();
+  if (comment && itemForId(comment.itemId)) refreshAnnotations(comment.itemId);
+  else refreshAnnotations();
+  renderFileList();
+  renderCommentList();
+}
+
+function editComment(id) {
+  const comment = comments.get(id);
+  if (!comment || !commentHasCurrentAnchor(comment)) return;
+  const target = targetFromComment(comment);
+  if (!target) return;
+  closeCommentList();
+  if (target.kind !== "file") expandedItemModes.set(target.itemId, "full");
+  loadPatchView(target.itemId);
+  requestAnimationFrame(() => {
+    scrollToItem(target.itemId);
+    openComment(target);
+  });
+}
+
+function renderCommentList() {
+  const panel = document.getElementById("gdiff-comment-list");
+  if (!panel) return;
+  const body = panel.querySelector(".gdiff-comment-list-body");
+  const list = Array.from(comments.values()).sort((a, b) =>
+    a.file.localeCompare(b.file) || a.startLine - b.startLine || a.side.localeCompare(b.side)
+  );
+  if (!list.length) {
+    body.innerHTML = '<p class="gdiff-comment-list-empty">No comments stored.</p>';
+    return;
+  }
+  body.innerHTML = list.map(comment => {
+    const anchored = commentHasCurrentAnchor(comment);
+    return '<div class="gdiff-comment-row' + (anchored ? '' : ' gdiff-comment-orphan') + '" data-id="' + escapeHtml(comment.id) + '">' +
+      '<div class="gdiff-comment-row-head">' +
+      '<span class="gdiff-comment-row-target">' + escapeHtml(commentLabel(comment)) + '</span>' +
+      (anchored ? '' : '<span class="gdiff-orphan-badge">not in current diff</span>') +
+      '</div>' +
+      '<p class="gdiff-comment-row-feedback">' + escapeHtml(truncate(comment.comment, 240)) + '</p>' +
+      '<div class="gdiff-comment-row-actions">' +
+      (anchored ? '<button type="button" data-act="edit">Edit</button>' : '') +
+      '<button type="button" data-act="delete">Delete</button>' +
+      '</div>' +
+      '</div>';
+  }).join("");
+}
+
+function openCommentList() {
+  const existing = document.getElementById("gdiff-comment-list");
+  if (existing) {
+    closeCommentList();
+    return;
+  }
+  const panel = document.createElement("div");
+  panel.id = "gdiff-comment-list";
+  panel.className = "gdiff-comment-list";
+  panel.innerHTML =
+    '<div class="gdiff-comment-list-header">' +
+    '<strong>Comments</strong>' +
+    '<button type="button" data-act="close">Close</button>' +
+    '</div>' +
+    '<div class="gdiff-comment-list-body"></div>';
+  panel.querySelector('[data-act="close"]').addEventListener("click", closeCommentList);
+  panel.addEventListener("click", event => {
+    const row = event.target.closest(".gdiff-comment-row");
+    const action = event.target.closest("[data-act]");
+    if (!row || !action) return;
+    if (action.dataset.act === "delete") deleteComment(row.dataset.id);
+    if (action.dataset.act === "edit") editComment(row.dataset.id);
+  });
+  function onKey(event) {
+    if (event.key === "Escape") closeCommentList();
+  }
+  function onPointer(event) {
+    if (panel.contains(event.target)) return;
+    if (event.target.closest(".review-bar")) return;
+    closeCommentList();
+  }
+  panel.__cleanup = function () {
+    document.removeEventListener("keydown", onKey);
+    document.removeEventListener("mousedown", onPointer, true);
+  };
+  document.addEventListener("keydown", onKey);
+  document.addEventListener("mousedown", onPointer, true);
+  document.body.appendChild(panel);
+  renderCommentList();
+}
+
+function closeCommentList() {
+  const panel = document.getElementById("gdiff-comment-list");
+  if (!panel) return;
+  if (panel.__cleanup) panel.__cleanup();
+  panel.remove();
+}
+
 function saveCurrentComment(rawValue) {
   if (!currentTarget) return;
   const value = String(rawValue || "").trim();
@@ -1384,7 +1702,23 @@ function saveCurrentComment(rawValue) {
   }
   updateReviewCount();
   renderFileList();
+  renderCommentList();
   closePanel();
+}
+
+function renderContextBlock(before, commented, after, side, xml) {
+  const all = [];
+  before.forEach(entry => all.push({ line: lineNumberForSide(entry, side), code: entry.code, marker: false }));
+  commented.forEach(entry => all.push({ line: lineNumberForSide(entry, side), code: entry.code, marker: true }));
+  after.forEach(entry => all.push({ line: lineNumberForSide(entry, side), code: entry.code, marker: false }));
+  const visible = all.filter(entry => entry.line != null);
+  if (!visible.length) return "";
+  const width = String(visible.reduce((max, entry) => Math.max(max, entry.line), 0)).length;
+  return visible.map(entry => {
+    let num = String(entry.line);
+    while (num.length < width) num = " " + num;
+    return (entry.marker ? "> " : "  ") + num + "  " + xml(entry.code);
+  }).join("\\n");
 }
 
 function buildPrompt() {
@@ -1393,7 +1727,7 @@ function buildPrompt() {
     ">": "&gt;",
     "&": "&amp;",
     "'": "&apos;",
-    "\\"": "&quot;"
+    "\"": "&quot;"
   })[char]);
   const list = Array.from(comments.values()).sort((a, b) =>
     a.file.localeCompare(b.file) || a.startLine - b.startLine || a.side.localeCompare(b.side)
@@ -1406,17 +1740,29 @@ function buildPrompt() {
     "",
     "Return a concise summary of the changes you made and call out any feedback you could not apply.",
     "",
+    "Each <context> block shows the commented line(s) prefixed with '> ' and up to " + CONTEXT_LINES + " surrounding lines on each side from the same hunk.",
+    "",
     "<review_feedback>"
   ];
   list.forEach((comment, index) => {
-    lines.push("  <comment index=\\"" + (index + 1) + "\\">");
+    const context = promptContextForComment(comment);
+    lines.push("  <comment index=\"" + (index + 1) + "\">");
     lines.push("    <file>" + xml(comment.file) + "</file>");
     if (comment.kind === "file") {
       lines.push("    <scope>file</scope>");
     } else {
-      lines.push("    <lines side=\\"" + xml(comment.side) + "\\" start=\\"" + xml(comment.startLine) + "\\" end=\\"" + xml(comment.endLine) + "\\" />");
+      lines.push("    <lines side=\"" + xml(comment.side) + "\" start=\"" + xml(comment.startLine) + "\" end=\"" + xml(comment.endLine) + "\" />");
     }
+    if (context && context.hunk) lines.push("    <hunk>" + xml(context.hunk) + "</hunk>");
     lines.push("    <code>" + xml(comment.code) + "</code>");
+    if (context) {
+      const contextBlock = renderContextBlock(context.before, context.commented, context.after, context.side, xml);
+      if (contextBlock) {
+        lines.push("    <context>");
+        lines.push(contextBlock);
+        lines.push("    </context>");
+      }
+    }
     lines.push("    <feedback>" + xml(comment.comment) + "</feedback>");
     lines.push("  </comment>");
   });
@@ -1443,6 +1789,7 @@ function clearComments() {
   refreshAnnotations();
   renderFileList();
   closePanel();
+  closeCommentList();
 }
 
 const codeViewOptions = {
@@ -1894,6 +2241,7 @@ document.getElementById("file-list").addEventListener("click", event => {
     scrollToItem(jump.dataset.fileJump);
   }
 });
+document.getElementById("review-count-button").addEventListener("click", openCommentList);
 document.getElementById("copy-comments").addEventListener("click", copyComments);
 document.getElementById("clear-comments").addEventListener("click", clearComments);
 
