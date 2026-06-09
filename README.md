@@ -55,8 +55,8 @@ In the HTML diff view:
 
 - Click a **line number** (gutter) to add or edit feedback for that line. The code column stays selectable so you can still copy snippets.
 - Drag across line numbers, or click one and then shift-click another, to comment on a range.
-- Click the comment icon in a file header, or in the current-file controls at the top of the page, to leave file-level feedback.
-- Use the top current-file controls to keep the active file's **Viewed** toggle and file-comment button reachable while you scroll. The controls stay in sync with the file header controls, sidebar state, and the `v` / `c` keyboard shortcuts.
+- Click the comment icon in a file header to leave file-level feedback.
+- Each file header sticks while you scroll through that file, keeping its **Viewed** toggle and file-comment button reachable. The header controls stay in sync with sidebar state and the `v` / `c` keyboard shortcuts.
 - Comments are saved to `localStorage` immediately. When `python3` is available, `gdiff` also serves the HTML over `127.0.0.1` and persists comments to `.gdiff-review.json` at the repository root.
 - If `python3` is missing, the local server cannot start, or you open the generated HTML file directly, comments continue to work from `localStorage` only.
 - JSON comment records include `id`, `kind`, `itemId`, `file`, `side`, `line`, `startLine`, `endLine`, `code`, `comment`, `resolved`, and `resolution`. The `resolved` and `resolution` fields are preserved for downstream review workflows even though the current UI does not expose resolution controls yet.
