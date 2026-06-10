@@ -110,6 +110,12 @@ if [ -z "$repo_identity_source" ]; then
   repo_identity_source="$repo_root"
 fi
 repo_storage_id="$(printf '%s' "$repo_identity_source" | git hash-object --stdin)"
+if [ "${#args[@]}" -eq 0 ]; then
+  diff_args_identity="working-tree"
+else
+  diff_args_identity="$(printf '%s\n' "${args[@]}")"
+fi
+diff_args_storage_id="$(printf '%s' "$diff_args_identity" | git hash-object --stdin)"
 title="gdiff — $repo_name"
 patch_bytes="$(wc -c <"$patch_file" | tr -d '[:space:]')"
 
@@ -917,14 +923,17 @@ let baseItems = [];
 const comments = new Map();
 const reviewContextId = "$review_context_id";
 const repoStorageId = "$repo_storage_id";
-const storageScope = repoStorageId || location.pathname;
-const storageKey = "gdiff-review-comments:v2:" + storageScope + ":" + reviewContextId;
-const viewStorageKey = "gdiff-view-style:" + storageScope;
-const viewedStorageKey = "gdiff-viewed-files:v2:" + storageScope;
-const collapsedDirsStorageKey = "gdiff-collapsed-dirs:" + storageScope;
-const sidebarStorageKey = "gdiff-sidebar-collapsed:" + storageScope;
-const unreviewedStorageKey = "gdiff-unreviewed-only:" + storageScope;
-const themeStorageKey = "gdiff-theme-mode:" + storageScope;
+const diffArgsStorageId = "$diff_args_storage_id";
+const commentStorageScope = repoStorageId || location.pathname;
+const viewStorageScope = commentStorageScope + ":" + (diffArgsStorageId || reviewContextId);
+const storageKey = "gdiff-review-comments:v2:" + commentStorageScope;
+const legacyStoragePrefix = "gdiff-review-comments:v2:" + commentStorageScope + ":";
+const viewStorageKey = "gdiff-view-style:" + viewStorageScope;
+const viewedStorageKey = "gdiff-viewed-files:v2:" + viewStorageScope;
+const collapsedDirsStorageKey = "gdiff-collapsed-dirs:" + viewStorageScope;
+const sidebarStorageKey = "gdiff-sidebar-collapsed:" + viewStorageScope;
+const unreviewedStorageKey = "gdiff-unreviewed-only:" + viewStorageScope;
+const themeStorageKey = "gdiff-theme-mode:" + viewStorageScope;
 let diffStyle = localStorage.getItem(viewStorageKey) === "unified" ? "unified" : "split";
 const expandedItemModes = new Map();
 let collapsedDirs = new Set(JSON.parse(localStorage.getItem(collapsedDirsStorageKey) || "[]"));
@@ -996,12 +1005,31 @@ function hashString(value) {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-function diffHashForFile(fileDiff) {
-  return hashString(stableStringify(fileDiff));
+const diffHashCache = new Map();
+let patchTextByFile = null;
+function stablePatchValue(value) {
+  if (value == null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(stablePatchValue);
+  const skip = new Set(["annotations", "collapsed", "metadata", "version"]);
+  const out = {};
+  Object.keys(value).sort().forEach(key => {
+    if (skip.has(key) || typeof value[key] === "function") return;
+    out[key] = stablePatchValue(value[key]);
+  });
+  return out;
 }
 
-function reviewKeyForFile(fileDiff) {
-  return String(fileDiff.name || "");
+function patchTextForFile(fileDiff) {
+  if (!patchTextByFile) patchTextByFile = parsePatchTextByFile(patchPayloads.compact);
+  return patchTextByFile.get(fileDiff.name) || "";
+}
+
+function diffHashForFile(itemId, fileDiff) {
+  if (diffHashCache.has(itemId)) return diffHashCache.get(itemId);
+  const source = patchTextForFile(fileDiff) || stableStringify(stablePatchValue(fileDiff));
+  const hash = hashString(source);
+  diffHashCache.set(itemId, hash);
+  return hash;
 }
 
 function loadViewedFiles() {
@@ -1052,8 +1080,8 @@ function parseItems(mode) {
         id: itemId,
         type: "diff",
         fileDiff,
-        reviewKey: reviewKeyForFile(fileDiff),
-        diffHash: diffHashForFile(fileDiff),
+        reviewKey: itemId,
+        diffHash: mode === "compact" ? diffHashForFile(itemId, fileDiff) : "",
         annotations: [],
         version: itemVersionSeed
       };
@@ -1136,35 +1164,79 @@ function mergeComments(list) {
   });
 }
 
-function localComments() {
+function parseStoredComments(raw) {
+  if (!raw) return [];
   try {
-    return JSON.parse(localStorage.getItem(storageKey) || "[]");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
-async function loadComments() {
+function localComments() {
+  const lists = [parseStoredComments(localStorage.getItem(storageKey))];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key && key.startsWith(legacyStoragePrefix) && key !== storageKey) {
+      lists.push(parseStoredComments(localStorage.getItem(key)));
+    }
+  }
+  return lists.flat();
+}
+
+function loadComments() {
   comments.clear();
   mergeComments(localComments());
 }
 
-function saveLocalComments() {
-  localStorage.setItem(storageKey, JSON.stringify(serializedComments()));
-}
-
 function saveComments() {
-  saveLocalComments();
+  localStorage.setItem(storageKey, JSON.stringify(serializedComments()));
 }
 
 function itemForId(itemId) {
   return baseItems.find(item => item.id === itemId);
 }
 
+function itemForComment(comment) {
+  return itemForId(comment.itemId) || baseItems.find(item => item.fileDiff.name === comment.file);
+}
+
 function stripPatchPath(value) {
   const text = String(value || "").trim();
   if (!text || text === "/dev/null") return "";
   return text.replace(/^[ab]\//, "");
+}
+
+function parsePatchTextByFile(rawPatch) {
+  const files = new Map();
+  let file = "";
+  let pendingOldFile = "";
+  let lines = [];
+  function flush() {
+    if (!file || !lines.length) return;
+    files.set(file, (files.get(file) ? files.get(file) + "\n" : "") + lines.join("\n"));
+  }
+  String(rawPatch || "").split(/\r?\n/).forEach(line => {
+    if (line.startsWith("diff --git ")) {
+      flush();
+      file = "";
+      pendingOldFile = "";
+      lines = [line];
+      return;
+    }
+    if (!lines.length) lines = [line];
+    else lines.push(line);
+    if (line.startsWith("--- ")) {
+      pendingOldFile = stripPatchPath(line.slice(4).split(/\t/)[0]);
+      return;
+    }
+    if (line.startsWith("+++ ")) {
+      file = stripPatchPath(line.slice(4).split(/\t/)[0]) || pendingOldFile;
+    }
+  });
+  flush();
+  return files;
 }
 
 function parsePromptHunks(rawPatch) {
@@ -1218,7 +1290,11 @@ function parsePromptHunks(rawPatch) {
   return files;
 }
 
-const promptHunks = parsePromptHunks(patchPayloads.full || patchPayloads.more || patchPayloads.compact);
+let promptHunks = null;
+function getPromptHunks() {
+  if (!promptHunks) promptHunks = parsePromptHunks(patchPayloads.full || patchPayloads.more || patchPayloads.compact);
+  return promptHunks;
+}
 
 function lineNumberForSide(entry, side) {
   return side === "old" ? entry.oldLine : entry.newLine;
@@ -1229,7 +1305,7 @@ function promptContextForComment(comment) {
   const side = comment.side === "old" ? "old" : "new";
   const startLine = Number(comment.startLine || comment.line || 0);
   const endLine = Number(comment.endLine || startLine);
-  const hunks = promptHunks.get(comment.file) || [];
+  const hunks = getPromptHunks().get(comment.file) || [];
   for (const hunk of hunks) {
     const sideLines = hunk.lines.filter(entry => lineNumberForSide(entry, side) != null);
     const indexes = [];
@@ -1243,7 +1319,7 @@ function promptContextForComment(comment) {
     return {
       hunk: hunk.header,
       before: sideLines.slice(Math.max(0, first - CONTEXT_LINES), first),
-      commented: sideLines.slice(first, last + 1),
+      commented: indexes.map(index => sideLines[index]),
       after: sideLines.slice(last + 1, last + 1 + CONTEXT_LINES),
       side
     };
@@ -1253,7 +1329,7 @@ function promptContextForComment(comment) {
 
 function commentHasCurrentAnchor(comment) {
   if (!comment) return false;
-  if (!itemForId(comment.itemId)) return false;
+  if (!itemForComment(comment)) return false;
   if (comment.kind === "file") return true;
   return Boolean(promptContextForComment(comment));
 }
@@ -1275,8 +1351,11 @@ function fileStatusGlyph(fileDiff, stat) {
 const COMMENT_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 3h10v7H7l-3 2.4V10H3z"/></svg>';
 
 function commentCountForItem(itemId) {
+  const item = itemForId(itemId);
   let count = 0;
-  for (const comment of comments.values()) if (comment.itemId === itemId) count += 1;
+  for (const comment of comments.values()) {
+    if (comment.itemId === itemId || (item && comment.file === item.fileDiff.name)) count += 1;
+  }
   return count;
 }
 
@@ -1360,7 +1439,7 @@ function escapeHtml(value) {
 
 function annotationsForItem(item) {
   const annotations = Array.from(comments.values())
-    .filter(comment => comment.kind !== "file" && comment.itemId === item.id)
+    .filter(comment => comment.kind !== "file" && (comment.itemId === item.id || comment.file === item.fileDiff.name) && commentHasCurrentAnchor(comment))
     .map(comment => ({
       side: annotationSide(comment.side),
       lineNumber: comment.endLine,
@@ -1405,7 +1484,7 @@ function refreshAnnotations(itemId) {
 function renderAnnotation(annotation) {
   if (annotation.metadata && annotation.metadata.kind === "editor") {
     const target = annotation.metadata.target;
-    const existing = comments.get(commentId(target));
+    const existing = commentForTarget(target);
     const panel = document.createElement("section");
     panel.className = "review-panel";
     panel.style.width = "min(720px, 100%)";
@@ -1476,7 +1555,7 @@ function openLineTarget(target, event) {
 
 function renderFileCommentPanel(target, anchor) {
   closeFileCommentPanel();
-  const existing = comments.get(commentId(target));
+  const existing = commentForTarget(target);
   const panel = document.createElement("section");
   panel.id = "file-comment-panel";
   panel.className = "review-panel is-file-comment";
@@ -1548,10 +1627,11 @@ function truncate(value, max) {
 
 function targetFromComment(comment) {
   if (!comment) return null;
+  const item = itemForComment(comment);
   if (comment.kind === "file") {
     return {
       kind: "file",
-      itemId: comment.itemId,
+      itemId: item ? item.id : comment.itemId,
       file: comment.file,
       side: "file",
       startLine: 0,
@@ -1565,7 +1645,7 @@ function targetFromComment(comment) {
     : comment.code;
   return {
     kind: "line",
-    itemId: comment.itemId,
+    itemId: item ? item.id : comment.itemId,
     file: comment.file,
     side: comment.side,
     startLine: comment.startLine || comment.line,
@@ -1677,10 +1757,11 @@ function saveCurrentComment(rawValue) {
   if (!currentTarget) return;
   const value = String(rawValue || "").trim();
   const id = commentId(currentTarget);
-  const existing = comments.get(id);
+  const existing = commentForTarget(currentTarget);
   if (!value) {
-    comments.delete(id);
+    if (existing) comments.delete(existing.id);
   } else {
+    if (existing && existing.id !== id) comments.delete(existing.id);
     comments.set(id, {
       id,
       kind: currentTarget.kind || "line",
@@ -1719,6 +1800,21 @@ function renderContextBlock(before, commented, after, side, xml) {
     while (num.length < width) num = " " + num;
     return (entry.marker ? "> " : "  ") + num + "  " + xml(entry.code);
   }).join("\\n");
+}
+
+function commentMatchesTarget(comment, target) {
+  if (!comment || !target || (comment.kind || "line") !== (target.kind || "line")) return false;
+  if (comment.file !== target.file) return false;
+  if ((comment.kind || "line") === "file") return true;
+  return comment.side === target.side &&
+    Number(comment.startLine || comment.line || 0) === Number(target.startLine || target.line || 0) &&
+    Number(comment.endLine || comment.startLine || comment.line || 0) === Number(target.endLine || target.startLine || target.line || 0);
+}
+
+function commentForTarget(target) {
+  const direct = comments.get(commentId(target));
+  if (direct) return direct;
+  return Array.from(comments.values()).find(comment => commentMatchesTarget(comment, target));
 }
 
 function buildPrompt() {
@@ -2130,24 +2226,18 @@ function openFileComment(itemId, anchor) {
   }, anchor);
 }
 
-function fileCommentCountForItem(itemId) {
-  let count = 0;
-  for (const comment of comments.values()) {
-    if (comment.kind === "file" && comment.itemId === itemId) count += 1;
-  }
-  return count;
-}
-
 let activeFileScrollQueued = false;
+let activeFileScrollTop = 0;
 function updateActiveFileFromScroll() {
   activeFileScrollQueued = false;
   if (!baseItems.length || !viewer || typeof viewer.getTopForItem !== "function") return;
-  const viewerRoot = document.getElementById("viewer");
-  const marker = (viewerRoot ? viewerRoot.scrollTop : 0) + 56;
+  const marker = activeFileScrollTop + 56;
   let current = baseItems[0];
   for (const item of baseItems) {
     const top = viewer.getTopForItem(item.id);
-    if (typeof top === "number" && top <= marker) current = item;
+    if (typeof top !== "number") continue;
+    if (top > marker) break;
+    current = item;
   }
   if (current) setActiveFile(current.id);
 }
@@ -2167,7 +2257,9 @@ function renderHeaderMetadata(...args) {
   const context = args[args.length - 1];
   const item = context && context.item ? context.item : itemForFileDiff(fileDiff);
   if (!item) return null;
-  const fileComments = Array.from(comments.values()).filter(comment => comment.kind === "file" && comment.itemId === item.id).length;
+  const fileComments = Array.from(comments.values()).filter(comment =>
+    comment.kind === "file" && (comment.itemId === item.id || comment.file === item.fileDiff.name)
+  ).length;
   const wrap = document.createElement("span");
   wrap.className = "gdiff-header-actions";
   wrap.dataset.itemId = item.id;
@@ -2206,11 +2298,21 @@ function renderHeaderMetadata(...args) {
   return wrap;
 }
 
-await loadComments();
+loadComments();
 viewer.setup(document.getElementById("viewer"));
 observeDiffViewer();
 loadPatchView();
-document.getElementById("viewer").addEventListener("scroll", scheduleActiveFileFromScroll, { passive: true, capture: true });
+if (typeof viewer.subscribeToScroll === "function") {
+  viewer.subscribeToScroll(scrollTop => {
+    activeFileScrollTop = Number(scrollTop) || 0;
+    scheduleActiveFileFromScroll();
+  });
+} else {
+  document.getElementById("viewer").addEventListener("scroll", event => {
+    activeFileScrollTop = event.currentTarget ? event.currentTarget.scrollTop : 0;
+    scheduleActiveFileFromScroll();
+  }, { passive: true, capture: true });
+}
 document.getElementById("stats").innerHTML =
   '<span class="stat-files">' + baseItems.length + ' files</span>' +
   '<span class="stat-add">+$total_add</span>' +
