@@ -42,7 +42,7 @@ ln -s "$PWD/gdiff/bin/gdiff" ~/.local/bin/gdiff
 
 - Runs `git diff` (working tree + staged, or against the refs you pass).
 - Streams the unified diff into a temp patch file.
-- Writes an HTML app to a temp dir and opens it in your default browser.
+- Writes a static HTML app to `.git/gdiff/diff.html` and opens it in your default browser.
 - The app parses and renders the patch with [`@pierre/diffs`](https://diffs.com/docs).
 
 The HTML view uses Diffs' `CodeView`, which handles virtualized file rendering, row/window measurement, scroll reconciliation, and syntax highlighting.
@@ -56,10 +56,11 @@ In the HTML diff view:
 - Click a **line number** (gutter) to add or edit feedback for that line. The code column stays selectable so you can still copy snippets.
 - Drag across line numbers, or click one and then shift-click another, to comment on a range.
 - Click the comment icon in a file header to leave file-level feedback.
-- Use **Delete** in the panel to remove a comment; clearing the textarea no longer deletes silently.
-- Commented lines are highlighted and stored in `localStorage` under a key derived from the repo path + diff args, so rerunning the same `gdiff` invocation restores your notes.
-- Click the **comment counter** in the floating bar to open the comment list. Each row shows file:line + feedback with an **Edit** / **Delete** button. Comments whose line no longer exists in the current diff (e.g. after the file changed between runs) are flagged **not in current diff** and can still be deleted from the list — no more orphaned counts.
-- Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent. Each comment carries its enclosing `@@ ... @@` hunk header and a few lines of context (the commented line is prefixed with `> `), so closing braces, blank lines, and other ambiguous targets stay actionable. If the browser blocks the clipboard API (common on `file://`), a fallback modal lets you copy manually.
+- Each file header sticks while you scroll through that file, keeping its **Viewed** toggle and file-comment button reachable. The header controls stay in sync with sidebar state and the `v` / `c` keyboard shortcuts.
+- Comments are saved to browser `localStorage` only, scoped to the repository so changed or removed anchors remain visible in the comment list. `gdiff` does not run a local server or write repository review-state JSON.
+- Click the floating **comment counter** to open the comment list. The list includes stored comments even when their old anchors are no longer present in the current diff; those rows are marked **not in current diff** and can be deleted individually.
+- Viewed file state is also saved to `localStorage`, scoped by repository and diff arguments. A file is restored as viewed only when its saved per-file diff hash matches the current diff, so changed or newly added files start unviewed until explicitly marked again.
+- Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent. Line comments include their enclosing `@@ ... @@` hunk header plus nearby context lines, with the commented line prefixed by `> `. If the browser blocks the clipboard API, a fallback modal lets you copy manually.
 
 ## Use it from Soloterm
 

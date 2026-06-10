@@ -80,12 +80,22 @@ if [ "$mode" = "unified" ]; then
   exit 0
 fi
 
+repo_root="$(git rev-parse --show-toplevel)"
+repo_name="$(basename "$repo_root")"
+git_dir="$(git rev-parse --git-dir)"
+case "$git_dir" in
+  /*) ;;
+  *) git_dir="$repo_root/$git_dir" ;;
+esac
+out_dir="$git_dir/gdiff"
+mkdir -p "$out_dir"
+
 tmp_dir="$(mktemp -d -t gdiff.XXXXXX)"
-out="$tmp_dir/diff.html"
+out="$out_dir/diff.html"
 patch_file="$tmp_dir/diff.patch"
 patch_more_file="$tmp_dir/diff.more.patch"
 patch_full_file="$tmp_dir/diff.full.patch"
-trap 'rm -f "$patch_file" "$patch_more_file" "$patch_full_file"' EXIT
+trap 'rm -rf "$tmp_dir"' EXIT
 
 collect_diff never >"$patch_file"
 if [ ! -s "$patch_file" ]; then
@@ -94,9 +104,18 @@ if [ ! -s "$patch_file" ]; then
 fi
 collect_diff never 20 >"$patch_more_file"
 collect_diff never 999999 >"$patch_full_file"
-
-repo_root="$(git rev-parse --show-toplevel)"
-repo_name="$(basename "$repo_root")"
+review_context_id="$(git hash-object "$patch_file")"
+repo_identity_source="$(git config --get remote.origin.url || true)"
+if [ -z "$repo_identity_source" ]; then
+  repo_identity_source="$repo_root"
+fi
+repo_storage_id="$(printf '%s' "$repo_identity_source" | git hash-object --stdin)"
+if [ "${#args[@]}" -eq 0 ]; then
+  diff_args_identity="working-tree"
+else
+  diff_args_identity="$(printf '%s\n' "${args[@]}")"
+fi
+diff_args_storage_id="$(printf '%s' "$diff_args_identity" | git hash-object --stdin)"
 title="gdiff — $repo_name"
 patch_bytes="$(wc -c <"$patch_file" | tr -d '[:space:]')"
 
@@ -185,6 +204,7 @@ cat >"$out" <<EOF
     padding: 10px 16px;
     border-bottom: 1px solid var(--border);
     background: var(--bg);
+    gap: 12px;
   }
   .top-left {
     display: flex;
@@ -246,7 +266,8 @@ cat >"$out" <<EOF
   .app-shell {
     display: grid;
     grid-template-columns: 300px minmax(0, 1fr);
-    min-height: calc(100vh - 52px);
+    height: calc(100vh - 52px);
+    min-height: 0;
   }
   .app-shell.is-sidebar-collapsed {
     grid-template-columns: 0 minmax(0, 1fr);
@@ -366,10 +387,24 @@ cat >"$out" <<EOF
   .file-tree-stat.is-del { color: var(--danger-fg); margin-inline-start: 4px; }
   .file-tree-count { margin-left: auto; color: var(--muted); font-size: 12px; }
   .file-tree-empty { padding: 10px 8px; color: var(--muted); font-size: 12px; }
-  #viewer { min-width: 0; min-height: calc(100vh - 52px); }
+  #viewer {
+    min-width: 0;
+    min-height: 0;
+    height: calc(100vh - 52px);
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
   @media (max-width: 900px) {
-    .app-shell { grid-template-columns: 1fr; }
+    .topbar { flex-wrap: wrap; align-items: stretch; }
+    .top-left { flex: 1 1 auto; }
+    .top-actions { flex: none; }
+    .app-shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
     .file-tree { position: static; height: auto; max-height: 220px; border-right: 0; border-bottom: 1px solid var(--border); }
+  }
+  @media (max-width: 560px) {
+    .top-actions { width: 100%; justify-content: space-between; gap: 6px; }
+    .view-toggle button { padding: 4px 6px; }
+    .stats { display: none; }
   }
   .review-bar {
     position: fixed;
@@ -387,8 +422,86 @@ cat >"$out" <<EOF
     color: var(--fg);
     font-size: 13px;
   }
-  .review-bar .review-count-label { color: var(--muted); }
-  .review-bar #review-count { font-weight: 600; color: var(--fg); }
+  .review-count-label {
+    border-color: transparent;
+    background: transparent;
+    color: var(--muted);
+    padding: 6px 8px;
+  }
+  .review-count-label:hover { background: var(--panel-hover); color: var(--fg); }
+  .review-count-label #review-count { font-weight: 600; color: var(--fg); }
+  .gdiff-comment-list {
+    position: fixed;
+    right: 16px;
+    bottom: 72px;
+    z-index: 31;
+    width: min(420px, calc(100vw - 32px));
+    max-height: min(60vh, 520px);
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--overlay-shadow);
+    font-size: 13px;
+  }
+  .gdiff-comment-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .gdiff-comment-list-body {
+    padding: 8px;
+    overflow-y: auto;
+  }
+  .gdiff-comment-list-empty {
+    margin: 0;
+    padding: 8px;
+    color: var(--muted);
+  }
+  .gdiff-comment-row {
+    padding: 8px;
+    border-radius: 6px;
+  }
+  .gdiff-comment-row + .gdiff-comment-row {
+    margin-top: 6px;
+    border-top: 1px solid var(--border-muted);
+    padding-top: 8px;
+  }
+  .gdiff-comment-orphan { background: var(--attention-bg); }
+  .gdiff-comment-row-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .gdiff-comment-row-target {
+    font: 12px var(--mono);
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .gdiff-orphan-badge {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--attention-bg);
+    color: var(--attention-fg);
+    border: 1px solid rgba(180, 83, 9, 0.35);
+  }
+  .gdiff-comment-row-feedback {
+    margin: 6px 0 8px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .gdiff-comment-row-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
   button {
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -649,7 +762,7 @@ cat >"$out" <<EOF
       <button type="button" id="view-split" data-diff-style="split">Side by side</button>
       <button type="button" id="view-unified" data-diff-style="unified">Stacked</button>
     </div>
-    <button type="button" id="theme-toggle" class="icon-btn" title="Toggle light / dark (t)" aria-label="Toggle light or dark theme">
+    <button type="button" id="theme-toggle" class="icon-btn" title="Toggle light / dark" aria-label="Toggle light or dark theme">
       <svg class="moon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6 1.6a6.4 6.4 0 1 0 8.4 8.4A5 5 0 1 1 6 1.6z"/></svg>
       <svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M12.8 3.2l-1.4 1.4M4.6 11.4l-1.4 1.4" stroke-linecap="round"/></svg>
     </button>
@@ -672,7 +785,7 @@ cat >"$out" <<EOF
   <main id="viewer"></main>
 </div>
 <div class="review-bar">
-  <span class="review-count-label"><span id="review-count">0</span> <span id="review-noun">comments</span></span>
+  <button type="button" id="review-count-button" class="review-count-label" title="Show all stored comments"><span id="review-count">0</span> <span id="review-noun">comments</span></button>
   <button type="button" id="copy-comments" class="primary">Copy prompt</button>
   <button type="button" id="clear-comments">Clear</button>
 </div>
@@ -680,10 +793,9 @@ cat >"$out" <<EOF
   <div class="help-card" role="dialog" aria-label="Keyboard shortcuts">
     <h2>Review shortcuts</h2>
     <p>gdiff — Atelier</p>
-    <div class="help-row"><span>Next / previous file</span><span><kbd>j</kbd> <kbd>k</kbd></span></div>
+    <div class="help-row"><span>Next / previous file</span><span><kbd>↓</kbd> <kbd>↑</kbd> <kbd>n</kbd> <kbd>p</kbd></span></div>
     <div class="help-row"><span>Toggle "viewed" on active file</span><kbd>v</kbd></div>
     <div class="help-row"><span>Comment on active file</span><kbd>c</kbd></div>
-    <div class="help-row"><span>Toggle light / dark</span><kbd>t</kbd></div>
     <div class="help-row"><span>Show / hide this help</span><kbd>?</kbd></div>
   </div>
 </div>
@@ -806,18 +918,24 @@ const patchPayloads = {
   more: decodeBase64Utf8(document.getElementById("patch-more-data").textContent),
   full: decodeBase64Utf8(document.getElementById("patch-full-data").textContent)
 };
+const CONTEXT_LINES = 3;
 let baseItems = [];
 const comments = new Map();
-const storageKey = "gdiff-review-comments:" + location.pathname;
-const viewStorageKey = "gdiff-view-style:" + location.pathname;
-const viewedStorageKey = "gdiff-viewed-files:" + location.pathname;
-const collapsedDirsStorageKey = "gdiff-collapsed-dirs:" + location.pathname;
-const sidebarStorageKey = "gdiff-sidebar-collapsed:" + location.pathname;
-const unreviewedStorageKey = "gdiff-unreviewed-only:" + location.pathname;
-const themeStorageKey = "gdiff-theme-mode:" + location.pathname;
+const reviewContextId = "$review_context_id";
+const repoStorageId = "$repo_storage_id";
+const diffArgsStorageId = "$diff_args_storage_id";
+const commentStorageScope = repoStorageId || location.pathname;
+const viewStorageScope = commentStorageScope + ":" + (diffArgsStorageId || reviewContextId);
+const storageKey = "gdiff-review-comments:v2:" + commentStorageScope;
+const legacyStoragePrefix = "gdiff-review-comments:v2:" + commentStorageScope + ":";
+const viewStorageKey = "gdiff-view-style:" + viewStorageScope;
+const viewedStorageKey = "gdiff-viewed-files:v2:" + viewStorageScope;
+const collapsedDirsStorageKey = "gdiff-collapsed-dirs:" + viewStorageScope;
+const sidebarStorageKey = "gdiff-sidebar-collapsed:" + viewStorageScope;
+const unreviewedStorageKey = "gdiff-unreviewed-only:" + viewStorageScope;
+const themeStorageKey = "gdiff-theme-mode:" + viewStorageScope;
 let diffStyle = localStorage.getItem(viewStorageKey) === "unified" ? "unified" : "split";
 const expandedItemModes = new Map();
-let viewedFiles = new Set(JSON.parse(localStorage.getItem(viewedStorageKey) || "[]"));
 let collapsedDirs = new Set(JSON.parse(localStorage.getItem(collapsedDirsStorageKey) || "[]"));
 let sidebarCollapsed = localStorage.getItem(sidebarStorageKey) === "1";
 let showUnreviewedOnly = localStorage.getItem(unreviewedStorageKey) === "1";
@@ -872,8 +990,81 @@ function itemIdForFile(fileDiff, patchIndex, fileIndex) {
   return patchIndex + ":" + fileIndex + ":" + fileDiff.name;
 }
 
+function stableStringify(value) {
+  if (value == null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]";
+  return "{" + Object.keys(value).sort().map(key => JSON.stringify(key) + ":" + stableStringify(value[key])).join(",") + "}";
+}
+
+function hashString(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+const diffHashCache = new Map();
+let patchTextByFile = null;
+function stablePatchValue(value) {
+  if (value == null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(stablePatchValue);
+  const skip = new Set(["annotations", "collapsed", "metadata", "version"]);
+  const out = {};
+  Object.keys(value).sort().forEach(key => {
+    if (skip.has(key) || typeof value[key] === "function") return;
+    out[key] = stablePatchValue(value[key]);
+  });
+  return out;
+}
+
+function patchTextForFile(fileDiff) {
+  if (!patchTextByFile) patchTextByFile = parsePatchTextByFile(patchPayloads.compact);
+  return patchTextByFile.get(fileDiff.name) || "";
+}
+
+function diffHashForFile(itemId, fileDiff) {
+  if (diffHashCache.has(itemId)) return diffHashCache.get(itemId);
+  const source = patchTextForFile(fileDiff) || stableStringify(stablePatchValue(fileDiff));
+  const hash = hashString(source);
+  diffHashCache.set(itemId, hash);
+  return hash;
+}
+
+function loadViewedFiles() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(viewedStorageKey) || "{}");
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return new Map();
+    return new Map(Object.entries(stored).filter(([, entry]) =>
+      entry && typeof entry === "object" && typeof entry.diffHash === "string"
+    ));
+  } catch {
+    return new Map();
+  }
+}
+
+let viewedFiles = loadViewedFiles();
+
+function isFileViewed(item) {
+  if (!item) return false;
+  const entry = viewedFiles.get(item.reviewKey);
+  return Boolean(entry && entry.diffHash === item.diffHash);
+}
+
+function pruneViewedFiles(items) {
+  const validKeys = new Set(items.map(item => item.reviewKey));
+  let changed = false;
+  for (const key of viewedFiles.keys()) {
+    if (validKeys.has(key)) continue;
+    viewedFiles.delete(key);
+    changed = true;
+  }
+  if (changed) saveViewedFiles();
+}
+
 function saveViewedFiles() {
-  localStorage.setItem(viewedStorageKey, JSON.stringify(Array.from(viewedFiles)));
+  localStorage.setItem(viewedStorageKey, JSON.stringify(Object.fromEntries(viewedFiles)));
 }
 
 function saveCollapsedDirs() {
@@ -893,21 +1084,25 @@ function setSidebarCollapsed(collapsed) {
 }
 
 function parseItems(mode) {
-  return parsePatchFiles(patchPayloads[mode], "gdiff-" + mode).flatMap((patch, patchIndex) =>
+  const items = parsePatchFiles(patchPayloads[mode], "gdiff-" + mode).flatMap((patch, patchIndex) =>
     patch.files.map((fileDiff, fileIndex) => {
       const itemId = itemIdForFile(fileDiff, patchIndex, fileIndex);
       const item = {
         id: itemId,
         type: "diff",
         fileDiff,
+        reviewKey: itemId,
+        diffHash: mode === "compact" ? diffHashForFile(itemId, fileDiff) : "",
         annotations: [],
         version: itemVersionSeed
       };
-      if (viewedFiles.has(itemId)) item.collapsed = true;
+      if (isFileViewed(item)) item.collapsed = true;
       item.annotations = annotationsForItem(item);
       return item;
     })
   );
+  if (mode === "compact") pruneViewedFiles(items);
+  return items;
 }
 
 function itemsForCurrentContext() {
@@ -921,7 +1116,11 @@ function itemsForCurrentContext() {
     const mode = expandedItemModes.get(item.id);
     if (!mode || mode === "compact") return item;
     if (!byMode[mode]) byMode[mode] = new Map(parseItems(mode).map(expanded => [expanded.id, expanded]));
-    return byMode[mode].get(item.id) || item;
+    const expanded = byMode[mode].get(item.id) || item;
+    expanded.reviewKey = item.reviewKey;
+    expanded.diffHash = item.diffHash;
+    expanded.collapsed = isFileViewed(expanded);
+    return expanded;
   });
 }
 
@@ -929,7 +1128,11 @@ function loadPatchView(scrollItemId) {
   itemVersionSeed += 1;
   const previousTarget = currentTarget;
   baseItems = itemsForCurrentContext();
+  for (const item of baseItems) item.annotations = annotationsForItem(item);
   currentTarget = previousTarget && baseItems.some(item => item.id === previousTarget.itemId) ? previousTarget : null;
+  if (!activeItemId || !baseItems.some(item => item.id === activeItemId)) {
+    activeItemId = baseItems[0]?.id || null;
+  }
   if (currentTarget) {
     const item = baseItems.find(item => item.id === currentTarget.itemId);
     if (item) item.annotations = annotationsForItem(item);
@@ -940,30 +1143,214 @@ function loadPatchView(scrollItemId) {
   updateReviewCount();
   if (scrollItemId) {
     requestAnimationFrame(() => {
-      const top = viewer.getTopForItem(scrollItemId);
-      if (typeof top === "number") window.scrollTo({ top, behavior: "smooth" });
       viewer.scrollTo({ type: "item", id: scrollItemId, align: "start", behavior: "auto" });
     });
   }
   scheduleHunkEnhancement();
 }
 
-function loadComments() {
+function normalizeComment(comment) {
+  if (!comment || typeof comment !== "object" || !comment.id) return null;
+  return {
+    id: String(comment.id),
+    kind: comment.kind || "line",
+    itemId: comment.itemId || "",
+    file: comment.file || "",
+    side: comment.side || "",
+    line: Number(comment.line || comment.startLine || 0),
+    startLine: Number(comment.startLine || comment.line || 0),
+    endLine: Number(comment.endLine || comment.startLine || comment.line || 0),
+    code: comment.code || "",
+    comment: comment.comment || "",
+    resolved: Boolean(comment.resolved),
+    resolution: comment.resolution || ""
+  };
+}
+
+function serializedComments() {
+  return Array.from(comments.values()).map(normalizeComment).filter(Boolean);
+}
+
+function mergeComments(list) {
+  if (!Array.isArray(list)) return;
+  list.map(normalizeComment).filter(Boolean).forEach(comment => {
+    comments.set(comment.id, comment);
+  });
+}
+
+function parseStoredComments(raw) {
+  if (!raw) return [];
   try {
-    JSON.parse(localStorage.getItem(storageKey) || "[]").forEach(comment => {
-      comments.set(comment.id, comment);
-    });
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    comments.clear();
+    return [];
   }
 }
 
+function localComments() {
+  const lists = [parseStoredComments(localStorage.getItem(storageKey))];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key && key.startsWith(legacyStoragePrefix) && key !== storageKey) {
+      lists.push(parseStoredComments(localStorage.getItem(key)));
+    }
+  }
+  return lists.flat();
+}
+
+function loadComments() {
+  comments.clear();
+  mergeComments(localComments());
+}
+
 function saveComments() {
-  localStorage.setItem(storageKey, JSON.stringify(Array.from(comments.values())));
+  localStorage.setItem(storageKey, JSON.stringify(serializedComments()));
 }
 
 function itemForId(itemId) {
   return baseItems.find(item => item.id === itemId);
+}
+
+function uniqueItemForFile(file) {
+  const matches = baseItems.filter(item => item.fileDiff.name === file);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function itemForComment(comment) {
+  return itemForId(comment.itemId) || uniqueItemForFile(comment.file);
+}
+
+function stripPatchPath(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "/dev/null") return "";
+  return text.replace(/^[ab]\//, "");
+}
+
+function parsePatchTextByFile(rawPatch) {
+  const files = new Map();
+  let file = "";
+  let pendingOldFile = "";
+  let lines = [];
+  function flush() {
+    if (!file || !lines.length) return;
+    files.set(file, (files.get(file) ? files.get(file) + "\n" : "") + lines.join("\n"));
+  }
+  String(rawPatch || "").split(/\r?\n/).forEach(line => {
+    if (line.startsWith("diff --git ")) {
+      flush();
+      file = "";
+      pendingOldFile = "";
+      lines = [line];
+      return;
+    }
+    if (!lines.length) lines = [line];
+    else lines.push(line);
+    if (line.startsWith("--- ")) {
+      pendingOldFile = stripPatchPath(line.slice(4).split(/\t/)[0]);
+      return;
+    }
+    if (line.startsWith("+++ ")) {
+      file = stripPatchPath(line.slice(4).split(/\t/)[0]) || pendingOldFile;
+    }
+  });
+  flush();
+  return files;
+}
+
+function parsePromptHunks(rawPatch) {
+  const files = new Map();
+  let file = "";
+  let pendingOldFile = "";
+  let hunk = null;
+  let oldLine = 0;
+  let newLine = 0;
+  String(rawPatch || "").split(/\r?\n/).forEach(line => {
+    if (line.startsWith("diff --git ")) {
+      file = "";
+      pendingOldFile = "";
+      hunk = null;
+      return;
+    }
+    if (line.startsWith("--- ")) {
+      pendingOldFile = stripPatchPath(line.slice(4).split(/\t/)[0]);
+      return;
+    }
+    if (line.startsWith("+++ ")) {
+      file = stripPatchPath(line.slice(4).split(/\t/)[0]) || pendingOldFile;
+      if (file && !files.has(file)) files.set(file, []);
+      hunk = null;
+      return;
+    }
+    const match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@.*$/);
+    if (match) {
+      if (!file) return;
+      oldLine = Number(match[1]);
+      newLine = Number(match[2]);
+      hunk = { file, header: line, lines: [] };
+      files.get(file).push(hunk);
+      return;
+    }
+    if (!hunk || !line) return;
+    const marker = line[0];
+    const code = line.slice(1);
+    if (marker === " ") {
+      hunk.lines.push({ oldLine, newLine, code });
+      oldLine += 1;
+      newLine += 1;
+    } else if (marker === "+") {
+      hunk.lines.push({ oldLine: null, newLine, code });
+      newLine += 1;
+    } else if (marker === "-") {
+      hunk.lines.push({ oldLine, newLine: null, code });
+      oldLine += 1;
+    }
+  });
+  return files;
+}
+
+let promptHunks = null;
+function getPromptHunks() {
+  if (!promptHunks) promptHunks = parsePromptHunks(patchPayloads.full || patchPayloads.more || patchPayloads.compact);
+  return promptHunks;
+}
+
+function lineNumberForSide(entry, side) {
+  return side === "old" ? entry.oldLine : entry.newLine;
+}
+
+function promptContextForComment(comment) {
+  if (!comment || comment.kind === "file") return null;
+  const side = comment.side === "old" ? "old" : "new";
+  const startLine = Number(comment.startLine || comment.line || 0);
+  const endLine = Number(comment.endLine || startLine);
+  const hunks = getPromptHunks().get(comment.file) || [];
+  for (const hunk of hunks) {
+    const sideLines = hunk.lines.filter(entry => lineNumberForSide(entry, side) != null);
+    const indexes = [];
+    sideLines.forEach((entry, index) => {
+      const line = lineNumberForSide(entry, side);
+      if (line >= startLine && line <= endLine) indexes.push(index);
+    });
+    if (!indexes.length) continue;
+    const first = indexes[0];
+    const last = indexes[indexes.length - 1];
+    return {
+      hunk: hunk.header,
+      before: sideLines.slice(Math.max(0, first - CONTEXT_LINES), first),
+      commented: indexes.map(index => sideLines[index]),
+      after: sideLines.slice(last + 1, last + 1 + CONTEXT_LINES),
+      side
+    };
+  }
+  return null;
+}
+
+function commentHasCurrentAnchor(comment) {
+  if (!comment) return false;
+  if (!itemForComment(comment)) return false;
+  if (comment.kind === "file") return true;
+  return Boolean(promptContextForComment(comment));
 }
 
 function fileStat(fileDiff) {
@@ -983,8 +1370,11 @@ function fileStatusGlyph(fileDiff, stat) {
 const COMMENT_ICON = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 3h10v7H7l-3 2.4V10H3z"/></svg>';
 
 function commentCountForItem(itemId) {
+  const item = itemForId(itemId);
   let count = 0;
-  for (const comment of comments.values()) if (comment.itemId === itemId) count += 1;
+  for (const comment of comments.values()) {
+    if (comment.itemId === itemId || (item && uniqueItemForFile(comment.file) === item)) count += 1;
+  }
   return count;
 }
 
@@ -992,7 +1382,7 @@ function updateProgress() {
   const el = document.getElementById("tree-progress");
   if (!el) return;
   let viewed = 0;
-  for (const item of baseItems) if (viewedFiles.has(item.id)) viewed += 1;
+  for (const item of baseItems) if (isFileViewed(item)) viewed += 1;
   el.innerHTML = "<b>" + viewed + "</b> / " + baseItems.length + " viewed";
 }
 
@@ -1002,7 +1392,7 @@ function renderFileList() {
   const dirCounts = new Map();
   const items = baseItems
     .filter(item => !filter || item.fileDiff.name.toLowerCase().includes(filter))
-    .filter(item => !showUnreviewedOnly || !viewedFiles.has(item.id))
+    .filter(item => !showUnreviewedOnly || !isFileViewed(item))
     .slice()
     .sort((a, b) => a.fileDiff.name.localeCompare(b.fileDiff.name));
   for (const item of items) {
@@ -1035,7 +1425,7 @@ function renderFileList() {
       }
     }
     if (hiddenByCollapsedDir) continue;
-    const viewedClass = viewedFiles.has(item.id) ? " is-viewed" : "";
+    const viewedClass = isFileViewed(item) ? " is-viewed" : "";
     const activeClass = item.id === activeItemId ? " is-active" : "";
     const stat = fileStat(item.fileDiff);
     const glyph = fileStatusGlyph(item.fileDiff, stat);
@@ -1062,13 +1452,13 @@ function escapeHtml(value) {
     "&": "&amp;",
     "<": "&lt;",
     ">": "&gt;",
-    "\\"": "&quot;"
+    "\"": "&quot;"
   })[char]);
 }
 
 function annotationsForItem(item) {
   const annotations = Array.from(comments.values())
-    .filter(comment => comment.kind !== "file" && comment.itemId === item.id)
+    .filter(comment => comment.kind !== "file" && (comment.itemId === item.id || uniqueItemForFile(comment.file) === item) && commentHasCurrentAnchor(comment))
     .map(comment => ({
       side: annotationSide(comment.side),
       lineNumber: comment.endLine,
@@ -1097,6 +1487,8 @@ function updateReviewCount() {
   document.getElementById("review-count").textContent = String(n);
   const noun = document.getElementById("review-noun");
   if (noun) noun.textContent = n === 1 ? "comment" : "comments";
+  const button = document.getElementById("review-count-button");
+  if (button) button.title = n ? "Show all stored comments" : "Show comment list";
 }
 
 function refreshAnnotations(itemId) {
@@ -1111,7 +1503,7 @@ function refreshAnnotations(itemId) {
 function renderAnnotation(annotation) {
   if (annotation.metadata && annotation.metadata.kind === "editor") {
     const target = annotation.metadata.target;
-    const existing = comments.get(commentId(target));
+    const existing = commentForTarget(target);
     const panel = document.createElement("section");
     panel.className = "review-panel";
     panel.style.width = "min(720px, 100%)";
@@ -1182,7 +1574,7 @@ function openLineTarget(target, event) {
 
 function renderFileCommentPanel(target, anchor) {
   closeFileCommentPanel();
-  const existing = comments.get(commentId(target));
+  const existing = commentForTarget(target);
   const panel = document.createElement("section");
   panel.id = "file-comment-panel";
   panel.className = "review-panel is-file-comment";
@@ -1239,13 +1631,156 @@ function closePanel() {
   if (previousItemId) refreshAnnotations(previousItemId);
 }
 
+function commentLabel(comment) {
+  if (comment.kind === "file") return (comment.file || "file") + " (file)";
+  const start = comment.startLine || comment.line || 0;
+  const end = comment.endLine || start;
+  const line = start === end ? String(start) : start + "-" + end;
+  return (comment.file || "file") + ":" + line;
+}
+
+function truncate(value, max) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > max ? text.slice(0, max - 1) + "..." : text;
+}
+
+function targetFromComment(comment) {
+  if (!comment) return null;
+  const item = itemForComment(comment);
+  if (comment.kind === "file") {
+    return {
+      kind: "file",
+      itemId: item ? item.id : comment.itemId,
+      file: comment.file,
+      side: "file",
+      startLine: 0,
+      endLine: 0,
+      code: ""
+    };
+  }
+  const context = promptContextForComment(comment);
+  const code = context && context.commented.length
+    ? context.commented.map(entry => entry.code).join("\n")
+    : comment.code;
+  return {
+    kind: "line",
+    itemId: item ? item.id : comment.itemId,
+    file: comment.file,
+    side: comment.side,
+    startLine: comment.startLine || comment.line,
+    endLine: comment.endLine || comment.startLine || comment.line,
+    code
+  };
+}
+
+function deleteComment(id) {
+  const comment = comments.get(id);
+  comments.delete(id);
+  saveComments();
+  if (comment && itemForId(comment.itemId)) refreshAnnotations(comment.itemId);
+  else refreshAnnotations();
+  renderFileList();
+  renderCommentList();
+}
+
+function editComment(id) {
+  const comment = comments.get(id);
+  if (!comment || !commentHasCurrentAnchor(comment)) return;
+  const target = targetFromComment(comment);
+  if (!target) return;
+  closeCommentList();
+  if (target.kind !== "file") expandedItemModes.set(target.itemId, "full");
+  loadPatchView(target.itemId);
+  requestAnimationFrame(() => {
+    scrollToItem(target.itemId);
+    openComment(target);
+  });
+}
+
+function renderCommentList() {
+  const panel = document.getElementById("gdiff-comment-list");
+  if (!panel) return;
+  const body = panel.querySelector(".gdiff-comment-list-body");
+  const list = Array.from(comments.values()).sort((a, b) =>
+    a.file.localeCompare(b.file) || a.startLine - b.startLine || a.side.localeCompare(b.side)
+  );
+  if (!list.length) {
+    body.innerHTML = '<p class="gdiff-comment-list-empty">No comments stored.</p>';
+    return;
+  }
+  body.innerHTML = list.map(comment => {
+    const anchored = commentHasCurrentAnchor(comment);
+    return '<div class="gdiff-comment-row' + (anchored ? '' : ' gdiff-comment-orphan') + '" data-id="' + escapeHtml(comment.id) + '">' +
+      '<div class="gdiff-comment-row-head">' +
+      '<span class="gdiff-comment-row-target">' + escapeHtml(commentLabel(comment)) + '</span>' +
+      (anchored ? '' : '<span class="gdiff-orphan-badge">not in current diff</span>') +
+      '</div>' +
+      '<p class="gdiff-comment-row-feedback">' + escapeHtml(truncate(comment.comment, 240)) + '</p>' +
+      '<div class="gdiff-comment-row-actions">' +
+      (anchored ? '<button type="button" data-act="edit">Edit</button>' : '') +
+      '<button type="button" data-act="delete">Delete</button>' +
+      '</div>' +
+      '</div>';
+  }).join("");
+}
+
+function openCommentList() {
+  const existing = document.getElementById("gdiff-comment-list");
+  if (existing) {
+    closeCommentList();
+    return;
+  }
+  const panel = document.createElement("div");
+  panel.id = "gdiff-comment-list";
+  panel.className = "gdiff-comment-list";
+  panel.innerHTML =
+    '<div class="gdiff-comment-list-header">' +
+    '<strong>Comments</strong>' +
+    '<button type="button" data-act="close">Close</button>' +
+    '</div>' +
+    '<div class="gdiff-comment-list-body"></div>';
+  panel.querySelector('[data-act="close"]').addEventListener("click", closeCommentList);
+  panel.addEventListener("click", event => {
+    const row = event.target.closest(".gdiff-comment-row");
+    const action = event.target.closest("[data-act]");
+    if (!row || !action) return;
+    if (action.dataset.act === "delete") deleteComment(row.dataset.id);
+    if (action.dataset.act === "edit") editComment(row.dataset.id);
+  });
+  function onKey(event) {
+    if (event.key === "Escape") closeCommentList();
+  }
+  function onPointer(event) {
+    if (panel.contains(event.target)) return;
+    if (event.target.closest(".review-bar")) return;
+    closeCommentList();
+  }
+  panel.__cleanup = function () {
+    document.removeEventListener("keydown", onKey);
+    document.removeEventListener("mousedown", onPointer, true);
+  };
+  document.addEventListener("keydown", onKey);
+  document.addEventListener("mousedown", onPointer, true);
+  document.body.appendChild(panel);
+  renderCommentList();
+}
+
+function closeCommentList() {
+  const panel = document.getElementById("gdiff-comment-list");
+  if (!panel) return;
+  if (panel.__cleanup) panel.__cleanup();
+  panel.remove();
+}
+
 function saveCurrentComment(rawValue) {
   if (!currentTarget) return;
   const value = String(rawValue || "").trim();
   const id = commentId(currentTarget);
+  const existing = commentForTarget(currentTarget);
   if (!value) {
-    comments.delete(id);
+    if (existing) comments.delete(existing.id);
   } else {
+    if (existing && existing.id !== id) comments.delete(existing.id);
     comments.set(id, {
       id,
       kind: currentTarget.kind || "line",
@@ -1256,7 +1791,9 @@ function saveCurrentComment(rawValue) {
       startLine: currentTarget.startLine || 0,
       endLine: currentTarget.endLine || 0,
       code: currentTarget.code,
-      comment: value
+      comment: value,
+      resolved: existing?.resolved || false,
+      resolution: existing?.resolution || ""
     });
   }
   saveComments();
@@ -1265,7 +1802,38 @@ function saveCurrentComment(rawValue) {
   }
   updateReviewCount();
   renderFileList();
+  renderCommentList();
   closePanel();
+}
+
+function renderContextBlock(before, commented, after, side, xml) {
+  const all = [];
+  before.forEach(entry => all.push({ line: lineNumberForSide(entry, side), code: entry.code, marker: false }));
+  commented.forEach(entry => all.push({ line: lineNumberForSide(entry, side), code: entry.code, marker: true }));
+  after.forEach(entry => all.push({ line: lineNumberForSide(entry, side), code: entry.code, marker: false }));
+  const visible = all.filter(entry => entry.line != null);
+  if (!visible.length) return "";
+  const width = String(visible.reduce((max, entry) => Math.max(max, entry.line), 0)).length;
+  return visible.map(entry => {
+    let num = String(entry.line);
+    while (num.length < width) num = " " + num;
+    return (entry.marker ? "> " : "  ") + num + "  " + xml(entry.code);
+  }).join("\\n");
+}
+
+function commentMatchesTarget(comment, target) {
+  if (!comment || !target || (comment.kind || "line") !== (target.kind || "line")) return false;
+  if (comment.file !== target.file) return false;
+  if ((comment.kind || "line") === "file") return true;
+  return comment.side === target.side &&
+    Number(comment.startLine || comment.line || 0) === Number(target.startLine || target.line || 0) &&
+    Number(comment.endLine || comment.startLine || comment.line || 0) === Number(target.endLine || target.startLine || target.line || 0);
+}
+
+function commentForTarget(target) {
+  const direct = comments.get(commentId(target));
+  if (direct) return direct;
+  return Array.from(comments.values()).find(comment => commentMatchesTarget(comment, target));
 }
 
 function buildPrompt() {
@@ -1274,7 +1842,7 @@ function buildPrompt() {
     ">": "&gt;",
     "&": "&amp;",
     "'": "&apos;",
-    "\\"": "&quot;"
+    "\"": "&quot;"
   })[char]);
   const list = Array.from(comments.values()).sort((a, b) =>
     a.file.localeCompare(b.file) || a.startLine - b.startLine || a.side.localeCompare(b.side)
@@ -1287,17 +1855,29 @@ function buildPrompt() {
     "",
     "Return a concise summary of the changes you made and call out any feedback you could not apply.",
     "",
+    "Each <context> block shows the commented line(s) prefixed with '> ' and up to " + CONTEXT_LINES + " surrounding lines on each side from the same hunk.",
+    "",
     "<review_feedback>"
   ];
   list.forEach((comment, index) => {
-    lines.push("  <comment index=\\"" + (index + 1) + "\\">");
+    const context = promptContextForComment(comment);
+    lines.push("  <comment index=\"" + (index + 1) + "\">");
     lines.push("    <file>" + xml(comment.file) + "</file>");
     if (comment.kind === "file") {
       lines.push("    <scope>file</scope>");
     } else {
-      lines.push("    <lines side=\\"" + xml(comment.side) + "\\" start=\\"" + xml(comment.startLine) + "\\" end=\\"" + xml(comment.endLine) + "\\" />");
+      lines.push("    <lines side=\"" + xml(comment.side) + "\" start=\"" + xml(comment.startLine) + "\" end=\"" + xml(comment.endLine) + "\" />");
     }
+    if (context && context.hunk) lines.push("    <hunk>" + xml(context.hunk) + "</hunk>");
     lines.push("    <code>" + xml(comment.code) + "</code>");
+    if (context) {
+      const contextBlock = renderContextBlock(context.before, context.commented, context.after, context.side, xml);
+      if (contextBlock) {
+        lines.push("    <context>");
+        lines.push(contextBlock);
+        lines.push("    </context>");
+      }
+    }
     lines.push("    <feedback>" + xml(comment.comment) + "</feedback>");
     lines.push("  </comment>");
   });
@@ -1324,6 +1904,7 @@ function clearComments() {
   refreshAnnotations();
   renderFileList();
   closePanel();
+  closeCommentList();
 }
 
 const codeViewOptions = {
@@ -1486,6 +2067,10 @@ function eachRoot(callback) {
 // it once per root is enough — virtualized rows mounted later in that root inherit it.
 const diffThemeCss = [
   ".gdiff-annotation{display:inline-flex;align-items:center;gap:4px;margin-inline-start:6px;padding:1px 8px;border-radius:999px;background:var(--accent-subtle);color:var(--accent-fg);font:11px -apple-system,BlinkMacSystemFont,sans-serif;}",
+  "[data-diffs-header]{background:var(--bg);border-bottom:1px solid var(--border);box-shadow:0 1px 0 var(--border-muted);z-index:3;}",
+  "[data-diffs-header][data-sticky]{position:sticky;top:0;}",
+  "[data-header-content],[data-metadata]{min-width:0;}",
+  "[data-metadata]{display:flex;align-items:center;gap:8px;}",
   ".gdiff-header-actions{display:inline-flex;gap:8px;align-items:center;margin-inline-start:8px;}",
   ".gdiff-header-actions label{display:inline-flex;gap:4px;align-items:center;color:var(--muted);font:12px -apple-system,BlinkMacSystemFont,sans-serif;cursor:pointer;}",
   ".gdiff-comment-button{position:relative;display:inline-flex;align-items:center;justify-content:center;width:28px;height:26px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;}",
@@ -1617,12 +2202,17 @@ function syncContextToggle() {
 }
 
 function setFileViewed(itemId, viewed) {
-  if (viewed) viewedFiles.add(itemId);
-  else viewedFiles.delete(itemId);
-  saveViewedFiles();
   const item = itemForId(itemId);
   if (!item) return;
-  item.collapsed = viewedFiles.has(itemId);
+  if (viewed) {
+    viewedFiles.set(item.reviewKey, {
+      diffHash: item.diffHash
+    });
+  } else {
+    viewedFiles.delete(item.reviewKey);
+  }
+  saveViewedFiles();
+  item.collapsed = isFileViewed(item);
   item.version = (item.version || 0) + 1;
   viewer.updateItem(item);
   renderFileList();
@@ -1636,10 +2226,6 @@ function setActiveFile(itemId) {
 
 function scrollToItem(itemId) {
   setActiveFile(itemId);
-  const top = viewer.getTopForItem(itemId);
-  if (typeof top === "number") {
-    window.scrollTo({ top, behavior: "smooth" });
-  }
   viewer.scrollTo({ type: "item", id: itemId, align: "start", behavior: "auto" });
 }
 
@@ -1657,6 +2243,31 @@ function openFileComment(itemId, anchor) {
   }, anchor);
 }
 
+let activeFileScrollQueued = false;
+let activeFileScrollTop = 0;
+function updateActiveFileFromScroll() {
+  activeFileScrollQueued = false;
+  if (!baseItems.length || !viewer || typeof viewer.getTopForItem !== "function") return;
+  const marker = activeFileScrollTop + 56;
+  let current = baseItems[0];
+  let currentTop = Number.NEGATIVE_INFINITY;
+  for (const item of baseItems) {
+    const top = viewer.getTopForItem(item.id);
+    if (typeof top !== "number") continue;
+    if (top <= marker && top >= currentTop) {
+      current = item;
+      currentTop = top;
+    }
+  }
+  if (current) setActiveFile(current.id);
+}
+
+function scheduleActiveFileFromScroll() {
+  if (activeFileScrollQueued) return;
+  activeFileScrollQueued = true;
+  window.requestAnimationFrame(updateActiveFileFromScroll);
+}
+
 function itemForFileDiff(fileDiff) {
   return baseItems.find(item => item.fileDiff === fileDiff || item.fileDiff.name === fileDiff.name);
 }
@@ -1666,14 +2277,16 @@ function renderHeaderMetadata(...args) {
   const context = args[args.length - 1];
   const item = context && context.item ? context.item : itemForFileDiff(fileDiff);
   if (!item) return null;
-  const fileComments = Array.from(comments.values()).filter(comment => comment.kind === "file" && comment.itemId === item.id).length;
+  const fileComments = Array.from(comments.values()).filter(comment =>
+    comment.kind === "file" && (comment.itemId === item.id || uniqueItemForFile(comment.file) === item)
+  ).length;
   const wrap = document.createElement("span");
   wrap.className = "gdiff-header-actions";
   wrap.dataset.itemId = item.id;
   const label = document.createElement("label");
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
-  checkbox.checked = viewedFiles.has(item.id);
+  checkbox.checked = isFileViewed(item);
   checkbox.addEventListener("click", event => event.stopPropagation());
   checkbox.addEventListener("change", event => {
     event.stopPropagation();
@@ -1709,6 +2322,17 @@ loadComments();
 viewer.setup(document.getElementById("viewer"));
 observeDiffViewer();
 loadPatchView();
+if (typeof viewer.subscribeToScroll === "function") {
+  viewer.subscribeToScroll(scrollTop => {
+    activeFileScrollTop = Number(scrollTop) || 0;
+    scheduleActiveFileFromScroll();
+  });
+} else {
+  document.getElementById("viewer").addEventListener("scroll", event => {
+    activeFileScrollTop = event.currentTarget ? event.currentTarget.scrollTop : 0;
+    scheduleActiveFileFromScroll();
+  }, { passive: true, capture: true });
+}
 document.getElementById("stats").innerHTML =
   '<span class="stat-files">' + baseItems.length + ' files</span>' +
   '<span class="stat-add">+$total_add</span>' +
@@ -1739,13 +2363,14 @@ document.getElementById("file-list").addEventListener("click", event => {
     scrollToItem(jump.dataset.fileJump);
   }
 });
+document.getElementById("review-count-button").addEventListener("click", openCommentList);
 document.getElementById("copy-comments").addEventListener("click", copyComments);
 document.getElementById("clear-comments").addEventListener("click", clearComments);
 
 // Stagger reveal is a one-time affair — drop the flag so filter re-renders don't re-animate.
 window.setTimeout(() => document.getElementById("file-list").classList.remove("is-initial"), 850);
 
-// Keyboard review flow: j/k step through changed files, v toggles "viewed" on the active file.
+// Keyboard review flow: arrows and n/p step through changed files, v toggles "viewed" on the active file.
 function sortedItemIds() {
   return baseItems.slice().sort((a, b) => a.fileDiff.name.localeCompare(b.fileDiff.name)).map(item => item.id);
 }
@@ -1763,11 +2388,10 @@ document.addEventListener("keydown", event => {
   const nonTextInput = ["checkbox", "radio", "button", "submit", "range"].includes((target && target.type ? target.type : "").toLowerCase());
   const typing = tag === "TEXTAREA" || (target && target.isContentEditable) || (tag === "INPUT" && !nonTextInput);
   if (typing) return;
-  if (event.key === "j") { event.preventDefault(); moveActiveFile(1); }
-  else if (event.key === "k") { event.preventDefault(); moveActiveFile(-1); }
-  else if (event.key === "v" && activeItemId) { event.preventDefault(); setFileViewed(activeItemId, !viewedFiles.has(activeItemId)); }
+  if (event.key === "ArrowDown" || event.key === "n") { event.preventDefault(); moveActiveFile(1); }
+  else if (event.key === "ArrowUp" || event.key === "p") { event.preventDefault(); moveActiveFile(-1); }
+  else if (event.key === "v" && activeItemId) { event.preventDefault(); setFileViewed(activeItemId, !isFileViewed(itemForId(activeItemId))); }
   else if (event.key === "c" && activeItemId) { event.preventDefault(); openFileComment(activeItemId); }
-  else if (event.key === "t") { event.preventDefault(); applyTheme(!darkMode); }
   else if (event.key === "?") { event.preventDefault(); toggleHelp(); }
   else if (event.key === "Escape") { closeHelp(); }
 });
