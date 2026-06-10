@@ -1052,6 +1052,17 @@ function isFileViewed(item) {
   return Boolean(entry && entry.diffHash === item.diffHash);
 }
 
+function pruneViewedFiles(items) {
+  const validKeys = new Set(items.map(item => item.reviewKey));
+  let changed = false;
+  for (const key of viewedFiles.keys()) {
+    if (validKeys.has(key)) continue;
+    viewedFiles.delete(key);
+    changed = true;
+  }
+  if (changed) saveViewedFiles();
+}
+
 function saveViewedFiles() {
   localStorage.setItem(viewedStorageKey, JSON.stringify(Object.fromEntries(viewedFiles)));
 }
@@ -1073,7 +1084,7 @@ function setSidebarCollapsed(collapsed) {
 }
 
 function parseItems(mode) {
-  return parsePatchFiles(patchPayloads[mode], "gdiff-" + mode).flatMap((patch, patchIndex) =>
+  const items = parsePatchFiles(patchPayloads[mode], "gdiff-" + mode).flatMap((patch, patchIndex) =>
     patch.files.map((fileDiff, fileIndex) => {
       const itemId = itemIdForFile(fileDiff, patchIndex, fileIndex);
       const item = {
@@ -1090,6 +1101,8 @@ function parseItems(mode) {
       return item;
     })
   );
+  if (mode === "compact") pruneViewedFiles(items);
+  return items;
 }
 
 function itemsForCurrentContext() {
@@ -1115,6 +1128,7 @@ function loadPatchView(scrollItemId) {
   itemVersionSeed += 1;
   const previousTarget = currentTarget;
   baseItems = itemsForCurrentContext();
+  for (const item of baseItems) item.annotations = annotationsForItem(item);
   currentTarget = previousTarget && baseItems.some(item => item.id === previousTarget.itemId) ? previousTarget : null;
   if (!activeItemId || !baseItems.some(item => item.id === activeItemId)) {
     activeItemId = baseItems[0]?.id || null;
@@ -1198,8 +1212,13 @@ function itemForId(itemId) {
   return baseItems.find(item => item.id === itemId);
 }
 
+function uniqueItemForFile(file) {
+  const matches = baseItems.filter(item => item.fileDiff.name === file);
+  return matches.length === 1 ? matches[0] : null;
+}
+
 function itemForComment(comment) {
-  return itemForId(comment.itemId) || baseItems.find(item => item.fileDiff.name === comment.file);
+  return itemForId(comment.itemId) || uniqueItemForFile(comment.file);
 }
 
 function stripPatchPath(value) {
@@ -1354,7 +1373,7 @@ function commentCountForItem(itemId) {
   const item = itemForId(itemId);
   let count = 0;
   for (const comment of comments.values()) {
-    if (comment.itemId === itemId || (item && comment.file === item.fileDiff.name)) count += 1;
+    if (comment.itemId === itemId || (item && uniqueItemForFile(comment.file) === item)) count += 1;
   }
   return count;
 }
@@ -1439,7 +1458,7 @@ function escapeHtml(value) {
 
 function annotationsForItem(item) {
   const annotations = Array.from(comments.values())
-    .filter(comment => comment.kind !== "file" && (comment.itemId === item.id || comment.file === item.fileDiff.name) && commentHasCurrentAnchor(comment))
+    .filter(comment => comment.kind !== "file" && (comment.itemId === item.id || uniqueItemForFile(comment.file) === item) && commentHasCurrentAnchor(comment))
     .map(comment => ({
       side: annotationSide(comment.side),
       lineNumber: comment.endLine,
@@ -2187,9 +2206,7 @@ function setFileViewed(itemId, viewed) {
   if (!item) return;
   if (viewed) {
     viewedFiles.set(item.reviewKey, {
-      path: item.fileDiff.name,
-      diffHash: item.diffHash,
-      reviewedAt: new Date().toISOString()
+      diffHash: item.diffHash
     });
   } else {
     viewedFiles.delete(item.reviewKey);
@@ -2233,11 +2250,14 @@ function updateActiveFileFromScroll() {
   if (!baseItems.length || !viewer || typeof viewer.getTopForItem !== "function") return;
   const marker = activeFileScrollTop + 56;
   let current = baseItems[0];
+  let currentTop = Number.NEGATIVE_INFINITY;
   for (const item of baseItems) {
     const top = viewer.getTopForItem(item.id);
     if (typeof top !== "number") continue;
-    if (top > marker) break;
-    current = item;
+    if (top <= marker && top >= currentTop) {
+      current = item;
+      currentTop = top;
+    }
   }
   if (current) setActiveFile(current.id);
 }
@@ -2258,7 +2278,7 @@ function renderHeaderMetadata(...args) {
   const item = context && context.item ? context.item : itemForFileDiff(fileDiff);
   if (!item) return null;
   const fileComments = Array.from(comments.values()).filter(comment =>
-    comment.kind === "file" && (comment.itemId === item.id || comment.file === item.fileDiff.name)
+    comment.kind === "file" && (comment.itemId === item.id || uniqueItemForFile(comment.file) === item)
   ).length;
   const wrap = document.createElement("span");
   wrap.className = "gdiff-header-actions";
