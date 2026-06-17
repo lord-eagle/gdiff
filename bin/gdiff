@@ -75,8 +75,42 @@ collect_diff() {
   fi
 }
 
+# Untracked (new, never-added) files never appear in `git diff`, so list them
+# separately. Only meaningful for the working-tree modes (0 or 1 path arg); a
+# ref..ref comparison has no working-tree concept of "untracked".
+collect_untracked() {
+  if [ "${#args[@]}" -eq 0 ]; then
+    git --no-pager ls-files --others --exclude-standard
+  elif [ "${#args[@]}" -eq 1 ]; then
+    # A single arg is ambiguous: a ref (diff working tree vs ref → all untracked
+    # still apply) or a pathspec (filter untracked to that path). Disambiguate.
+    if git rev-parse --verify --quiet "${args[0]}^{commit}" >/dev/null 2>&1; then
+      git --no-pager ls-files --others --exclude-standard
+    else
+      git --no-pager ls-files --others --exclude-standard -- "${args[0]}"
+    fi
+  fi
+  # 2 args = ref..ref: no working tree involved, so no untracked files.
+}
+
+# Build a JSON string array of untracked paths, escaping backslash and quotes.
+untracked_json="["
+untracked_first=1
+while IFS= read -r untracked_path; do
+  [ -n "$untracked_path" ] || continue
+  untracked_esc="$(printf '%s' "$untracked_path" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  if [ "$untracked_first" -eq 1 ]; then untracked_first=0; else untracked_json="$untracked_json,"; fi
+  untracked_json="$untracked_json\"$untracked_esc\""
+done < <(collect_untracked)
+untracked_json="$untracked_json]"
+
 if [ "$mode" = "unified" ]; then
   collect_diff always
+  if [ "$untracked_json" != "[]" ]; then
+    echo
+    echo "# Untracked files (not in diff):"
+    collect_untracked | sed 's/^/#   /'
+  fi
   exit 0
 fi
 
@@ -98,7 +132,7 @@ patch_full_file="$tmp_dir/diff.full.patch"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 collect_diff never >"$patch_file"
-if [ ! -s "$patch_file" ]; then
+if [ ! -s "$patch_file" ] && [ "$untracked_json" = "[]" ]; then
   echo "gdiff: no changes to show."
   exit 0
 fi
@@ -387,6 +421,15 @@ cat >"$out" <<EOF
   .file-tree-stat.is-del { color: var(--danger-fg); margin-inline-start: 4px; }
   .file-tree-count { margin-left: auto; color: var(--muted); font-size: 12px; }
   .file-tree-empty { padding: 10px 8px; color: var(--muted); font-size: 12px; }
+  .untracked-panel { border-top: 1px solid var(--border); padding: 8px 4px 4px; margin-top: 4px; }
+  .untracked-title { padding: 2px 8px 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); display: flex; align-items: baseline; gap: 6px; }
+  .untracked-hint { font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--attention-fg); }
+  .untracked-item { display: flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 12px; }
+  .untracked-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+  .untracked-item.is-selected .untracked-name { color: var(--success-fg); }
+  .untracked-add { flex: none; cursor: pointer; font: inherit; font-size: 11px; line-height: 1; padding: 3px 7px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--panel); color: var(--muted); }
+  .untracked-add:hover { background: var(--panel-hover); color: var(--fg); }
+  .untracked-item.is-selected .untracked-add { border-color: var(--success-fg); background: var(--diff-add-bg); color: var(--success-fg); }
   #viewer {
     min-width: 0;
     min-height: 0;
@@ -473,6 +516,8 @@ cat >"$out" <<EOF
     padding-top: 8px;
   }
   .gdiff-comment-orphan { background: var(--attention-bg); }
+  .gdiff-gitadd-title { margin: 10px 0 4px; padding: 0 2px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); border-top: 1px solid var(--border-muted); padding-top: 8px; }
+  .gdiff-gitadd-row .gdiff-comment-row-target { color: var(--success-fg); font-weight: 600; }
   .gdiff-comment-row-head {
     display: flex;
     align-items: center;
@@ -502,6 +547,7 @@ cat >"$out" <<EOF
     gap: 8px;
     justify-content: flex-end;
   }
+  .review-count-label #review-files { font-weight: 600; color: var(--success-fg); }
   button {
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -781,11 +827,15 @@ cat >"$out" <<EOF
       <label class="tree-filter"><input type="checkbox" id="unreviewed-only"> Unreviewed only</label>
     </div>
     <nav class="file-tree-list is-initial" id="file-list"></nav>
+    <div class="untracked-panel" id="untracked-panel" hidden>
+      <div class="untracked-title">Untracked <span class="untracked-hint">not in diff</span></div>
+      <div class="untracked-list" id="untracked-list"></div>
+    </div>
   </aside>
   <main id="viewer"></main>
 </div>
 <div class="review-bar">
-  <button type="button" id="review-count-button" class="review-count-label" title="Show all stored comments"><span id="review-count">0</span> <span id="review-noun">comments</span></button>
+  <button type="button" id="review-count-button" class="review-count-label" title="Show all stored comments"><span id="review-count">0</span> <span id="review-noun">comments</span><span id="review-files"></span></button>
   <button type="button" id="copy-comments" class="primary">Copy prompt</button>
   <button type="button" id="clear-comments">Clear</button>
 </div>
@@ -934,6 +984,8 @@ const collapsedDirsStorageKey = "gdiff-collapsed-dirs:" + viewStorageScope;
 const sidebarStorageKey = "gdiff-sidebar-collapsed:" + viewStorageScope;
 const unreviewedStorageKey = "gdiff-unreviewed-only:" + viewStorageScope;
 const themeStorageKey = "gdiff-theme-mode:" + viewStorageScope;
+const gitAddStorageKey = "gdiff-gitadd-files:" + viewStorageScope;
+let gitAddSelected = new Set(JSON.parse(localStorage.getItem(gitAddStorageKey) || "[]"));
 let diffStyle = localStorage.getItem(viewStorageKey) === "unified" ? "unified" : "split";
 const expandedItemModes = new Map();
 let collapsedDirs = new Set(JSON.parse(localStorage.getItem(collapsedDirsStorageKey) || "[]"));
@@ -949,6 +1001,10 @@ let lastLineTarget = null;
 // Config injected from gdiff env (GDIFF_TOKEN_HOOKS / GDIFF_ITEM_METRICS).
 const tokenHooksEnabled = "$token_hooks" === "1";
 const itemMetrics = $item_metrics;
+
+// Untracked (never-added) files — not part of any git diff. Listed so the
+// reviewer can flag them to be \`git add\`ed via the copied prompt.
+const untrackedFiles = $untracked_json;
 
 let tokenTipEl = null;
 function showTokenTip(props, event) {
@@ -1489,6 +1545,36 @@ function updateReviewCount() {
   if (noun) noun.textContent = n === 1 ? "comment" : "comments";
   const button = document.getElementById("review-count-button");
   if (button) button.title = n ? "Show all stored comments" : "Show comment list";
+  const filesEl = document.getElementById("review-files");
+  if (filesEl) {
+    const f = gitAddSelected.size;
+    filesEl.textContent = f ? (" + " + f + (f === 1 ? " file to add" : " files to add")) : "";
+  }
+}
+
+function saveGitAdd() {
+  localStorage.setItem(gitAddStorageKey, JSON.stringify(Array.from(gitAddSelected)));
+}
+
+function renderUntracked() {
+  const panel = document.getElementById("untracked-panel");
+  const list = document.getElementById("untracked-list");
+  if (!panel || !list) return;
+  if (!Array.isArray(untrackedFiles) || !untrackedFiles.length) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  list.innerHTML = untrackedFiles.map(file => {
+    const selected = gitAddSelected.has(file);
+    return '<div class="untracked-item' + (selected ? ' is-selected' : '') + '">' +
+      '<span class="untracked-name" title="' + escapeHtml(file) + '">' + escapeHtml(file) + '</span>' +
+      '<button type="button" class="untracked-add" data-untracked="' + escapeHtml(file) + '"' +
+        ' title="Add a \\u0060git add\\u0060 instruction for this file to the copied prompt">' +
+        (selected ? 'In prompt \\u2713' : '+ prompt') +
+      '</button>' +
+    '</div>';
+  }).join("");
 }
 
 function refreshAnnotations(itemId) {
@@ -1704,11 +1790,12 @@ function renderCommentList() {
   const list = Array.from(comments.values()).sort((a, b) =>
     a.file.localeCompare(b.file) || a.startLine - b.startLine || a.side.localeCompare(b.side)
   );
-  if (!list.length) {
+  const gitAdds = Array.from(gitAddSelected);
+  if (!list.length && !gitAdds.length) {
     body.innerHTML = '<p class="gdiff-comment-list-empty">No comments stored.</p>';
     return;
   }
-  body.innerHTML = list.map(comment => {
+  let html = list.map(comment => {
     const anchored = commentHasCurrentAnchor(comment);
     return '<div class="gdiff-comment-row' + (anchored ? '' : ' gdiff-comment-orphan') + '" data-id="' + escapeHtml(comment.id) + '">' +
       '<div class="gdiff-comment-row-head">' +
@@ -1722,6 +1809,20 @@ function renderCommentList() {
       '</div>' +
       '</div>';
   }).join("");
+  if (gitAdds.length) {
+    html += '<div class="gdiff-gitadd-title">Files to git add</div>' +
+      gitAdds.map(file =>
+        '<div class="gdiff-comment-row gdiff-gitadd-row" data-gitadd="' + escapeHtml(file) + '">' +
+        '<div class="gdiff-comment-row-head">' +
+        '<span class="gdiff-comment-row-target">' + escapeHtml(file) + '</span>' +
+        '</div>' +
+        '<div class="gdiff-comment-row-actions">' +
+        '<button type="button" data-act="gitadd-remove">Remove</button>' +
+        '</div>' +
+        '</div>'
+      ).join("");
+  }
+  body.innerHTML = html;
 }
 
 function openCommentList() {
@@ -1746,6 +1847,13 @@ function openCommentList() {
     if (!row || !action) return;
     if (action.dataset.act === "delete") deleteComment(row.dataset.id);
     if (action.dataset.act === "edit") editComment(row.dataset.id);
+    if (action.dataset.act === "gitadd-remove") {
+      gitAddSelected.delete(row.dataset.gitadd);
+      saveGitAdd();
+      renderCommentList();
+      renderUntracked();
+      updateReviewCount();
+    }
   });
   function onKey(event) {
     if (event.key === "Escape") closeCommentList();
@@ -1847,18 +1955,21 @@ function buildPrompt() {
   const list = Array.from(comments.values()).sort((a, b) =>
     a.file.localeCompare(b.file) || a.startLine - b.startLine || a.side.localeCompare(b.side)
   );
-  const lines = [
-    "Please address the following line-level review feedback from the git diff.",
-    "",
-    "Before editing, inspect all comments and target locations first so line numbers do not drift while you work.",
-    "Then address the comments one by one.",
-    "",
-    "Return a concise summary of the changes you made and call out any feedback you could not apply.",
-    "",
-    "Each <context> block shows the commented line(s) prefixed with '> ' and up to " + CONTEXT_LINES + " surrounding lines on each side from the same hunk.",
-    "",
-    "<review_feedback>"
-  ];
+  const lines = [];
+  if (list.length) {
+    lines.push(
+      "Please address the following line-level review feedback from the git diff.",
+      "",
+      "Before editing, inspect all comments and target locations first so line numbers do not drift while you work.",
+      "Then address the comments one by one.",
+      "",
+      "Return a concise summary of the changes you made and call out any feedback you could not apply.",
+      "",
+      "Each <context> block shows the commented line(s) prefixed with '> ' and up to " + CONTEXT_LINES + " surrounding lines on each side from the same hunk.",
+      "",
+      "<review_feedback>"
+    );
+  }
   list.forEach((comment, index) => {
     const context = promptContextForComment(comment);
     lines.push("  <comment index=\"" + (index + 1) + "\">");
@@ -1881,12 +1992,24 @@ function buildPrompt() {
     lines.push("    <feedback>" + xml(comment.comment) + "</feedback>");
     lines.push("  </comment>");
   });
-  lines.push("</review_feedback>");
+  if (list.length) lines.push("</review_feedback>");
+  const gitAdds = Array.from(gitAddSelected);
+  if (gitAdds.length) {
+    if (lines.length) lines.push("");
+    lines.push(
+      "The following new files are untracked and not yet part of the git diff.",
+      "Please \`git add\` them so they are included in the commit:",
+      "",
+      "<git_add_files>"
+    );
+    gitAdds.forEach(file => lines.push("  <file>" + xml(file) + "</file>"));
+    lines.push("</git_add_files>");
+  }
   return lines.join("\\n");
 }
 
 function copyComments() {
-  const prompt = comments.size ? buildPrompt() : "No gdiff review comments have been added.";
+  const prompt = (comments.size || gitAddSelected.size) ? buildPrompt() : "No gdiff review comments have been added.";
   navigator.clipboard.writeText(prompt).then(() => {
     const button = document.getElementById("copy-comments");
     const label = button.textContent;
@@ -2366,6 +2489,19 @@ document.getElementById("file-list").addEventListener("click", event => {
 document.getElementById("review-count-button").addEventListener("click", openCommentList);
 document.getElementById("copy-comments").addEventListener("click", copyComments);
 document.getElementById("clear-comments").addEventListener("click", clearComments);
+
+renderUntracked();
+updateReviewCount();
+document.getElementById("untracked-list").addEventListener("click", event => {
+  const button = event.target.closest("[data-untracked]");
+  if (!button) return;
+  const file = button.getAttribute("data-untracked");
+  if (gitAddSelected.has(file)) gitAddSelected.delete(file);
+  else gitAddSelected.add(file);
+  saveGitAdd();
+  renderUntracked();
+  updateReviewCount();
+});
 
 // Stagger reveal is a one-time affair — drop the flag so filter re-renders don't re-animate.
 window.setTimeout(() => document.getElementById("file-list").classList.remove("is-initial"), 850);
