@@ -497,6 +497,19 @@ cat >"$out" <<EOF
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
   }
+  .gdiff-comment-list-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .gdiff-delete-stale {
+    color: var(--danger-fg);
+  }
+  .gdiff-delete-stale:disabled {
+    opacity: 0.48;
+    color: var(--muted);
+    cursor: default;
+  }
   .gdiff-comment-list-body {
     padding: 8px;
     overflow-y: auto;
@@ -1769,6 +1782,33 @@ function deleteComment(id) {
   renderCommentList();
 }
 
+function staleComments() {
+  return Array.from(comments.values()).filter(comment => !commentHasCurrentAnchor(comment));
+}
+
+function syncDeleteStaleButton() {
+  const button = document.querySelector('[data-act="delete-stale"]');
+  if (!button) return;
+  const count = staleComments().length;
+  button.disabled = count === 0;
+  button.textContent = count ? "Delete stale (" + count + ")" : "Delete stale";
+  button.title = count ? "Delete comments not in the current diff" : "No stale comments";
+}
+
+function deleteStaleComments() {
+  const stale = staleComments();
+  if (!stale.length) {
+    syncDeleteStaleButton();
+    return;
+  }
+  if (!confirm("Delete " + stale.length + " stale comment" + (stale.length === 1 ? "" : "s") + "?")) return;
+  stale.forEach(comment => comments.delete(comment.id));
+  saveComments();
+  refreshAnnotations();
+  renderFileList();
+  renderCommentList();
+}
+
 function editComment(id) {
   const comment = comments.get(id);
   if (!comment || !commentHasCurrentAnchor(comment)) return;
@@ -1791,6 +1831,7 @@ function renderCommentList() {
     a.file.localeCompare(b.file) || a.startLine - b.startLine || a.side.localeCompare(b.side)
   );
   const gitAdds = Array.from(gitAddSelected);
+  syncDeleteStaleButton();
   if (!list.length && !gitAdds.length) {
     body.innerHTML = '<p class="gdiff-comment-list-empty">No comments stored.</p>';
     return;
@@ -1837,10 +1878,14 @@ function openCommentList() {
   panel.innerHTML =
     '<div class="gdiff-comment-list-header">' +
     '<strong>Comments</strong>' +
+    '<div class="gdiff-comment-list-actions">' +
+    '<button type="button" class="gdiff-delete-stale" data-act="delete-stale">Delete stale</button>' +
     '<button type="button" data-act="close">Close</button>' +
+    '</div>' +
     '</div>' +
     '<div class="gdiff-comment-list-body"></div>';
   panel.querySelector('[data-act="close"]').addEventListener("click", closeCommentList);
+  panel.querySelector('[data-act="delete-stale"]').addEventListener("click", deleteStaleComments);
   panel.addEventListener("click", event => {
     const row = event.target.closest(".gdiff-comment-row");
     const action = event.target.closest("[data-act]");
