@@ -38,6 +38,14 @@ ln -s "$PWD/gdiff/bin/gdiff" ~/.local/bin/gdiff
 
 `--unified` mode needs only `git`.
 
+## Development
+
+`bin/gdiff` is the single-file distributable used by curl installs and Homebrew. Edit the split sources in `src/gdiff/`, then rebuild:
+
+```sh
+scripts/build-gdiff
+```
+
 ## How it works
 
 - Runs `git diff` (working tree + staged, or against the refs you pass).
