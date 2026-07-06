@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+src_dir="$repo_root/src/gdiff"
+out="$repo_root/bin/gdiff"
+marker="GDIFF_HTML_EOF"
+
+parts=(
+  "$src_dir/runtime.sh"
+  "$src_dir/document-open.html"
+  "$src_dir/styles.css"
+  "$src_dir/body-before-patch.html"
+  "$src_dir/patch-more-open.html"
+  "$src_dir/patch-full-open.html"
+  "$src_dir/app-open.html"
+  "$src_dir/app.js"
+  "$src_dir/document-close.html"
+  "$src_dir/open.sh"
+)
+
+for part in "${parts[@]}"; do
+  if [ ! -f "$part" ]; then
+    echo "build-gdiff: missing $part" >&2
+    exit 1
+  fi
+  if grep -Fxq "$marker" "$part"; then
+    echo "build-gdiff: heredoc marker '$marker' appears in $part" >&2
+    exit 1
+  fi
+done
+
+{
+  cat "$src_dir/runtime.sh"
+  printf '\ncat >"$out" <<%s\n' "$marker"
+  cat "$src_dir/document-open.html"
+  printf '<style>\n'
+  cat "$src_dir/styles.css"
+  printf '</style>\n'
+  cat "$src_dir/body-before-patch.html"
+  printf '%s\n' "$marker"
+  printf 'base64 -i "$patch_file" >>"$out"\n'
+  printf 'cat >>"$out" <<%s\n' "$marker"
+  cat "$src_dir/patch-more-open.html"
+  printf '%s\n' "$marker"
+  printf 'base64 -i "$patch_more_file" >>"$out"\n'
+  printf 'cat >>"$out" <<%s\n' "$marker"
+  cat "$src_dir/patch-full-open.html"
+  printf '%s\n' "$marker"
+  printf 'base64 -i "$patch_full_file" >>"$out"\n'
+  printf 'cat >>"$out" <<%s\n' "$marker"
+  cat "$src_dir/app-open.html"
+  cat "$src_dir/app.js"
+  cat "$src_dir/document-close.html"
+  printf '%s\n\n' "$marker"
+  cat "$src_dir/open.sh"
+} >"$out"
+
+chmod +x "$out"
