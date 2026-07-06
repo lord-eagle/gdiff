@@ -59,6 +59,7 @@ In the HTML diff view:
 - Each file header sticks while you scroll through that file, keeping its **Viewed** toggle and file-comment button reachable. The header controls stay in sync with sidebar state and the `v` / `c` keyboard shortcuts.
 - Comments are saved to browser `localStorage` only, scoped to the repository so changed or removed anchors remain visible in the comment list. `gdiff` does not run a local server or write repository review-state JSON.
 - Click the floating **comment counter** to open the comment list. The list includes stored comments even when their old anchors are no longer present in the current diff; those rows are marked **not in current diff** and can be deleted individually.
+- Use **Delete stale** in the comment list to remove all comments whose anchors are no longer present in the current diff.
 - Viewed file state is also saved to `localStorage`, scoped by repository and diff arguments. A file is restored as viewed only when its saved per-file diff hash matches the current diff, so changed or newly added files start unviewed until explicitly marked again.
 - Click **Copy prompt** to copy all comments as structured feedback that can be pasted into an agent. Line comments include their enclosing `@@ ... @@` hunk header plus nearby context lines, with the commented line prefixed by `> `. If the browser blocks the clipboard API, a fallback modal lets you copy manually.
 
