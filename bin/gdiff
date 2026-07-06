@@ -299,12 +299,18 @@ cat >"$out" <<EOF
   }
   .app-shell {
     display: grid;
-    grid-template-columns: 300px minmax(0, 1fr);
+    grid-template-columns: 300px minmax(0, 1fr) 270px;
     height: calc(100vh - 52px);
     min-height: 0;
   }
   .app-shell.is-sidebar-collapsed {
-    grid-template-columns: 0 minmax(0, 1fr);
+    grid-template-columns: 0 minmax(0, 1fr) 270px;
+  }
+  .app-shell.is-method-outline-collapsed {
+    grid-template-columns: 300px minmax(0, 1fr) 0;
+  }
+  .app-shell.is-sidebar-collapsed.is-method-outline-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
   }
   .file-tree {
     position: sticky;
@@ -345,6 +351,8 @@ cat >"$out" <<EOF
   }
   #sidebar-toggle-top { display: none; }
   body.is-sidebar-collapsed #sidebar-toggle-top { display: inline-flex; }
+  #method-toggle-top { display: none; width: 30px; height: 28px; }
+  body.is-method-outline-collapsed #method-toggle-top { display: inline-flex; }
   .sidebar-toggle svg { width: 16px; height: 16px; }
   .file-tree-search {
     position: sticky;
@@ -437,12 +445,116 @@ cat >"$out" <<EOF
     overflow: auto;
     overscroll-behavior: contain;
   }
+  .method-outline {
+    position: sticky;
+    top: 52px;
+    z-index: 19;
+    height: calc(100vh - 52px);
+    min-width: 0;
+    overflow: auto;
+    border-left: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .app-shell.is-method-outline-collapsed .method-outline {
+    overflow: hidden;
+    border-left: 0;
+  }
+  .method-outline-title {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--display);
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .method-outline-heading {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .method-outline-file {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--muted);
+    font: 11px var(--mono);
+  }
+  .method-outline-search {
+    position: sticky;
+    top: 54px;
+    z-index: 1;
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .method-outline-search input {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+  }
+  .method-outline-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+  }
+  .method-outline-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: baseline;
+    width: 100%;
+    padding: 5px 7px;
+    border: 0;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--fg);
+    text-align: left;
+    font: 12px var(--mono);
+  }
+  .method-outline-item:hover { background: var(--panel-hover); }
+  .method-outline-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .method-outline-line {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .method-outline-empty {
+    padding: 10px 8px;
+    color: var(--muted);
+    font-size: 12px;
+  }
   @media (max-width: 900px) {
     .topbar { flex-wrap: wrap; align-items: stretch; }
     .top-left { flex: 1 1 auto; }
     .top-actions { flex: none; }
-    .app-shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+    .app-shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr) auto; }
+    .app-shell.is-sidebar-collapsed,
+    .app-shell.is-method-outline-collapsed,
+    .app-shell.is-sidebar-collapsed.is-method-outline-collapsed { grid-template-columns: 1fr; }
     .file-tree { position: static; height: auto; max-height: 220px; border-right: 0; border-bottom: 1px solid var(--border); }
+    .method-outline { position: static; height: auto; max-height: 220px; margin-bottom: 72px; border-left: 0; border-top: 1px solid var(--border); }
+    .app-shell.is-method-outline-collapsed .method-outline { display: none; }
+    .method-outline-title,
+    .method-outline-search { position: static; }
   }
   @media (max-width: 560px) {
     .top-actions { width: 100%; justify-content: space-between; gap: 6px; }
@@ -815,6 +927,9 @@ cat >"$out" <<EOF
     <button type="button" id="help-toggle" class="icon-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M6.2 6.1a1.9 1.9 0 1 1 2.5 1.8c-.5.2-.7.5-.7 1v.3" stroke-linecap="round"/><circle cx="8" cy="11.4" r="0.65" fill="currentColor" stroke="none"/></svg>
     </button>
+    <button type="button" class="sidebar-toggle" id="method-toggle-top" title="Show methods sidebar" aria-label="Show methods sidebar">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11v9h-11z"/><path d="M6.4 5.8 4.2 8l2.2 2.2"/><path d="M9.6 5.8 11.8 8l-2.2 2.2"/></svg>
+    </button>
     <div class="stats" id="stats"></div>
   </div>
 </header>
@@ -833,6 +948,17 @@ cat >"$out" <<EOF
     </div>
   </aside>
   <main id="viewer"></main>
+  <aside class="method-outline" aria-label="Methods in active file">
+    <div class="method-outline-title">
+      <span class="method-outline-heading">
+        <span>Methods</span>
+        <span class="method-outline-file" id="method-outline-file"></span>
+      </span>
+      <button type="button" class="sidebar-toggle" id="method-toggle-outline" title="Collapse methods sidebar" aria-label="Collapse methods sidebar"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11v9h-11z"/><path d="M6.4 5.8 4.2 8l2.2 2.2"/><path d="M9.6 5.8 11.8 8l-2.2 2.2"/></svg></button>
+    </div>
+    <div class="method-outline-search"><input id="method-search" type="search" placeholder="Filter methods..."></div>
+    <nav class="method-outline-list" id="method-list"></nav>
+  </aside>
 </div>
 <div class="review-bar">
   <button type="button" id="review-count-button" class="review-count-label" title="Show all stored comments"><span id="review-count">0</span> <span id="review-noun">comments</span><span id="review-files"></span></button>
@@ -982,6 +1108,7 @@ const viewStorageKey = "gdiff-view-style:" + viewStorageScope;
 const viewedStorageKey = "gdiff-viewed-files:v2:" + viewStorageScope;
 const collapsedDirsStorageKey = "gdiff-collapsed-dirs:" + viewStorageScope;
 const sidebarStorageKey = "gdiff-sidebar-collapsed:" + viewStorageScope;
+const methodOutlineStorageKey = "gdiff-method-outline-collapsed:" + viewStorageScope;
 const unreviewedStorageKey = "gdiff-unreviewed-only:" + viewStorageScope;
 const themeStorageKey = "gdiff-theme-mode:" + viewStorageScope;
 const gitAddStorageKey = "gdiff-gitadd-files:" + viewStorageScope;
@@ -990,13 +1117,16 @@ let diffStyle = localStorage.getItem(viewStorageKey) === "unified" ? "unified" :
 const expandedItemModes = new Map();
 let collapsedDirs = new Set(JSON.parse(localStorage.getItem(collapsedDirsStorageKey) || "[]"));
 let sidebarCollapsed = localStorage.getItem(sidebarStorageKey) === "1";
+let methodOutlineCollapsed = localStorage.getItem(methodOutlineStorageKey) !== "0";
 let showUnreviewedOnly = localStorage.getItem(unreviewedStorageKey) === "1";
 let darkMode = localStorage.getItem(themeStorageKey) === "dark";
 let fileFilter = "";
+let methodFilter = "";
 let activeItemId = null;
 let itemVersionSeed = 0;
 let currentTarget = null;
 let lastLineTarget = null;
+let methodHighlightTimer = null;
 
 // Config injected from gdiff env (GDIFF_TOKEN_HOOKS / GDIFF_ITEM_METRICS).
 const tokenHooksEnabled = "$token_hooks" === "1";
@@ -1139,6 +1269,18 @@ function setSidebarCollapsed(collapsed) {
   syncSidebarCollapsed();
 }
 
+function syncMethodOutlineCollapsed() {
+  document.querySelector(".app-shell").classList.toggle("is-method-outline-collapsed", methodOutlineCollapsed);
+  document.body.classList.toggle("is-method-outline-collapsed", methodOutlineCollapsed);
+  document.getElementById("method-toggle-top").setAttribute("aria-pressed", methodOutlineCollapsed ? "true" : "false");
+}
+
+function setMethodOutlineCollapsed(collapsed) {
+  methodOutlineCollapsed = collapsed;
+  localStorage.setItem(methodOutlineStorageKey, methodOutlineCollapsed ? "1" : "0");
+  syncMethodOutlineCollapsed();
+}
+
 function parseItems(mode) {
   const items = parsePatchFiles(patchPayloads[mode], "gdiff-" + mode).flatMap((patch, patchIndex) =>
     patch.files.map((fileDiff, fileIndex) => {
@@ -1195,6 +1337,7 @@ function loadPatchView(scrollItemId) {
   }
   viewer.setItems(baseItems);
   renderFileList();
+  renderMethodOutline();
   syncContextToggle();
   updateReviewCount();
   if (scrollItemId) {
@@ -1400,6 +1543,99 @@ function promptContextForComment(comment) {
     };
   }
   return null;
+}
+
+const METHOD_NAME_SKIP = new Set([
+  "if", "for", "foreach", "while", "switch", "catch", "else", "do", "try",
+  "return", "new", "class", "interface", "trait", "enum", "struct"
+]);
+
+function methodPatternMatch(code) {
+  const text = String(code || "").trim();
+  if (!text || text.startsWith("//") || text.startsWith("*") || text.startsWith("#")) return null;
+  const patterns = [
+    /^(?:(?:public|protected|private|static|final|abstract|readonly|async|export|default|declare|override|open|suspend|inline|pub|unsafe|extern)\\s+)*function\\s+([A-Za-z_$][\\w$]*)\\s*\\(/,
+    /^(?:export\\s+)?(?:async\\s+)?function\\s+([A-Za-z_$][\\w$]*)\\s*\\(/,
+    /^(?:async\\s+)?def\\s+([A-Za-z_]\\w*)\\s*\\(/,
+    /^def\\s+(?:self\\.)?([A-Za-z_]\\w*[!?=]?)\\b/,
+    /^func\\s+(?:\\([^)]*\\)\\s*)?([A-Za-z_]\\w*)\\s*\\(/,
+    /^(?:pub\\s+)?(?:async\\s+)?fn\\s+([A-Za-z_]\\w*)\\s*[<(]/,
+    /^(?:export\\s+)?(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*=>/,
+    /^(?:(?:public|private|protected|internal|static|final|abstract|override|async|virtual|sealed|synchronized|native|open|suspend|inline)\\s+)*(?:[A-Za-z_$][\\w$<>\\[\\],.?|&:]*\\s+)+([A-Za-z_$][\\w$]*)\\s*\\([^;]*\\)\\s*(?:\\{|throws\\b|where\\b|=>|$)/,
+    /^(?:async\\s+)?(?:get\\s+|set\\s+)?([A-Za-z_$][\\w$]*)\\s*\\([^;]*\\)\\s*(?:[:A-Za-z_$][\\w$<>\\[\\],.?|&\\s]*)?\\{\\s*$/
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const name = match[1];
+    if (!name || METHOD_NAME_SKIP.has(name.toLowerCase())) continue;
+    return { name, signature: text };
+  }
+  return null;
+}
+
+function methodOutlinesForFile(file) {
+  const hunks = getPromptHunks().get(file) || [];
+  const entries = hunks.flatMap(hunk => hunk.lines);
+  const hasNewLines = entries.some(entry => entry.newLine != null);
+  const seen = new Set();
+  const methods = [];
+  entries.forEach(entry => {
+    const line = hasNewLines ? entry.newLine : entry.oldLine;
+    if (line == null) return;
+    const match = methodPatternMatch(entry.code);
+    if (!match) return;
+    const side = hasNewLines ? "new" : "old";
+    const key = side + ":" + line + ":" + match.name;
+    if (seen.has(key)) return;
+    seen.add(key);
+    methods.push({
+      name: match.name,
+      signature: match.signature,
+      line,
+      side
+    });
+  });
+  return methods;
+}
+
+function methodOutlinesForItem(item) {
+  return item ? methodOutlinesForFile(item.fileDiff.name) : [];
+}
+
+function renderMethodOutline() {
+  const fileEl = document.getElementById("method-outline-file");
+  const list = document.getElementById("method-list");
+  if (!fileEl || !list) return;
+  const item = itemForId(activeItemId) || baseItems[0];
+  if (!item) {
+    fileEl.textContent = "";
+    list.innerHTML = '<div class="method-outline-empty">No active file.</div>';
+    return;
+  }
+  fileEl.textContent = item.fileDiff.name;
+  const filter = methodFilter.trim().toLowerCase();
+  const methods = methodOutlinesForItem(item);
+  const filtered = methods.filter(method =>
+    !filter ||
+    method.name.toLowerCase().includes(filter) ||
+    method.signature.toLowerCase().includes(filter) ||
+    String(method.line).includes(filter)
+  );
+  if (!methods.length) {
+    list.innerHTML = '<div class="method-outline-empty">No methods found.</div>';
+    return;
+  }
+  if (!filtered.length) {
+    list.innerHTML = '<div class="method-outline-empty">No methods match.</div>';
+    return;
+  }
+  list.innerHTML = filtered.map(method =>
+    '<button type="button" class="method-outline-item" data-method-jump="' + escapeHtml(item.id) + '" data-method-line="' + escapeHtml(method.line) + '" data-method-side="' + escapeHtml(method.side) + '" title="' + escapeHtml(method.signature) + '">' +
+    '<span class="method-outline-name">' + escapeHtml(method.name) + '</span>' +
+    '<span class="method-outline-line">' + escapeHtml(method.line) + '</span>' +
+    '</button>'
+  ).join("");
 }
 
 function commentHasCurrentAnchor(comment) {
@@ -2345,11 +2581,50 @@ function setActiveFile(itemId) {
   if (activeItemId === itemId) return;
   activeItemId = itemId;
   renderFileList();
+  renderMethodOutline();
 }
 
 function scrollToItem(itemId) {
   setActiveFile(itemId);
   viewer.scrollTo({ type: "item", id: itemId, align: "start", behavior: "auto" });
+}
+
+function methodScrollSide(side) {
+  return side === "old" ? "deletions" : "additions";
+}
+
+function highlightMethodLine(itemId, lineNumber, side) {
+  if (methodHighlightTimer) window.clearTimeout(methodHighlightTimer);
+  if (typeof viewer.setSelectedLines === "function") {
+    viewer.setSelectedLines({
+      id: itemId,
+      range: {
+        start: lineNumber,
+        end: lineNumber,
+        side
+      }
+    }, { notify: false });
+  }
+  methodHighlightTimer = window.setTimeout(() => {
+    if (typeof viewer.clearSelectedLines === "function") {
+      viewer.clearSelectedLines({ notify: false });
+    } else if (typeof viewer.setSelectedLines === "function") {
+      viewer.setSelectedLines(null, { notify: false });
+    }
+    methodHighlightTimer = null;
+  }, 1300);
+}
+
+function scrollToMethod(itemId, lineNumber, side) {
+  const item = itemForId(itemId);
+  const line = Number(lineNumber);
+  if (!item || !Number.isFinite(line)) return;
+  const scrollSide = methodScrollSide(side);
+  setActiveFile(itemId);
+  window.requestAnimationFrame(() => {
+    viewer.scrollTo({ type: "line", id: itemId, lineNumber: line, side: scrollSide, align: "center", behavior: "smooth-auto" });
+    highlightMethodLine(itemId, line, scrollSide);
+  });
 }
 
 function openFileComment(itemId, anchor) {
@@ -2462,14 +2737,26 @@ document.getElementById("stats").innerHTML =
   '<span class="stat-del">−$total_del</span>';
 syncViewToggle();
 syncSidebarCollapsed();
+syncMethodOutlineCollapsed();
 document.querySelectorAll("[data-diff-style]").forEach(button => {
   button.addEventListener("click", () => setDiffStyle(button.dataset.diffStyle));
 });
 document.getElementById("sidebar-toggle-top").addEventListener("click", () => setSidebarCollapsed(!sidebarCollapsed));
 document.getElementById("sidebar-toggle-tree").addEventListener("click", () => setSidebarCollapsed(true));
+document.getElementById("method-toggle-top").addEventListener("click", () => setMethodOutlineCollapsed(false));
+document.getElementById("method-toggle-outline").addEventListener("click", () => setMethodOutlineCollapsed(true));
 document.getElementById("file-search").addEventListener("input", event => {
   fileFilter = event.target.value;
   renderFileList();
+});
+document.getElementById("method-search").addEventListener("input", event => {
+  methodFilter = event.target.value;
+  renderMethodOutline();
+});
+document.getElementById("method-list").addEventListener("click", event => {
+  const jump = event.target.closest("[data-method-jump]");
+  if (!jump) return;
+  scrollToMethod(jump.dataset.methodJump, jump.dataset.methodLine, jump.dataset.methodSide);
 });
 document.getElementById("file-list").addEventListener("click", event => {
   const folder = event.target.closest("[data-dir]");

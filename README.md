@@ -47,7 +47,7 @@ ln -s "$PWD/gdiff/bin/gdiff" ~/.local/bin/gdiff
 
 The HTML view uses Diffs' `CodeView`, which handles virtualized file rendering, row/window measurement, scroll reconciliation, and syntax highlighting.
 
-The HTML view includes a searchable, collapsible file tree, side-by-side/stacked view switching, per-file viewed/collapse state, file-level comment icons, and inline hunk expand controls for showing more context.
+The HTML view includes a searchable, collapsible file tree, a searchable active-file method outline with jump navigation, side-by-side/stacked view switching, per-file viewed/collapse state, file-level comment icons, and inline hunk expand controls for showing more context.
 
 ## Review comments
 
