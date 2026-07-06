@@ -1945,13 +1945,7 @@ function commentForTarget(target) {
 }
 
 function buildPrompt() {
-  const xml = value => String(value).replace(/[<>&'"]/g, char => ({
-    "<": "&lt;",
-    ">": "&gt;",
-    "&": "&amp;",
-    "'": "&apos;",
-    "\"": "&quot;"
-  })[char]);
+  const promptText = value => String(value == null ? "" : value);
   const list = Array.from(comments.values()).sort((a, b) =>
     a.file.localeCompare(b.file) || a.startLine - b.startLine || a.side.localeCompare(b.side)
   );
@@ -1973,23 +1967,23 @@ function buildPrompt() {
   list.forEach((comment, index) => {
     const context = promptContextForComment(comment);
     lines.push("  <comment index=\"" + (index + 1) + "\">");
-    lines.push("    <file>" + xml(comment.file) + "</file>");
+    lines.push("    <file>" + promptText(comment.file) + "</file>");
     if (comment.kind === "file") {
       lines.push("    <scope>file</scope>");
     } else {
-      lines.push("    <lines side=\"" + xml(comment.side) + "\" start=\"" + xml(comment.startLine) + "\" end=\"" + xml(comment.endLine) + "\" />");
+      lines.push("    <lines side=\"" + promptText(comment.side) + "\" start=\"" + promptText(comment.startLine) + "\" end=\"" + promptText(comment.endLine) + "\" />");
     }
-    if (context && context.hunk) lines.push("    <hunk>" + xml(context.hunk) + "</hunk>");
-    lines.push("    <code>" + xml(comment.code) + "</code>");
+    if (context && context.hunk) lines.push("    <hunk>" + promptText(context.hunk) + "</hunk>");
+    lines.push("    <code>" + promptText(comment.code) + "</code>");
     if (context) {
-      const contextBlock = renderContextBlock(context.before, context.commented, context.after, context.side, xml);
+      const contextBlock = renderContextBlock(context.before, context.commented, context.after, context.side, promptText);
       if (contextBlock) {
         lines.push("    <context>");
         lines.push(contextBlock);
         lines.push("    </context>");
       }
     }
-    lines.push("    <feedback>" + xml(comment.comment) + "</feedback>");
+    lines.push("    <feedback>" + promptText(comment.comment) + "</feedback>");
     lines.push("  </comment>");
   });
   if (list.length) lines.push("</review_feedback>");
@@ -2002,7 +1996,7 @@ function buildPrompt() {
       "",
       "<git_add_files>"
     );
-    gitAdds.forEach(file => lines.push("  <file>" + xml(file) + "</file>"));
+    gitAdds.forEach(file => lines.push("  <file>" + promptText(file) + "</file>"));
     lines.push("</git_add_files>");
   }
   return lines.join("\\n");
