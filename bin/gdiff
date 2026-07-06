@@ -354,6 +354,11 @@ cat >"$out" <<EOF
     border-bottom: 1px solid var(--border);
     background: var(--bg);
   }
+  .file-tree-search-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
   .file-tree-search input {
     width: 100%;
     padding: 6px 8px;
@@ -362,6 +367,32 @@ cat >"$out" <<EOF
     background: var(--bg);
     color: var(--fg);
     font: inherit;
+  }
+  .filter-toggle {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    color: var(--muted);
+  }
+  .filter-toggle:hover,
+  .filter-toggle[aria-pressed="true"] {
+    background: var(--panel-hover);
+    color: var(--accent-fg);
+  }
+  .filter-toggle svg { width: 15px; height: 15px; }
+  .file-tree-filters {
+    display: none;
+    padding: 8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .file-tree-filters.is-open {
+    display: grid;
+    gap: 8px;
   }
   .file-tree-list {
     display: flex;
@@ -744,7 +775,7 @@ cat >"$out" <<EOF
       radial-gradient(1200px 620px at 100% -8%, rgba(224, 149, 74, 0.08), transparent 60%),
       radial-gradient(960px 520px at -10% 112%, rgba(91, 191, 174, 0.08), transparent 55%);
   }
-  /* Files header: viewed progress + unreviewed-only filter */
+  /* Files header: viewed progress + optional filters */
   .tree-meta {
     display: flex; align-items: center; gap: 8px;
     padding: 7px 12px;
@@ -753,8 +784,21 @@ cat >"$out" <<EOF
   }
   .tree-progress { font-size: 11px; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
   .tree-progress b { color: var(--accent-emphasis); font-weight: 600; }
-  .tree-filter { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap; }
-  .tree-filter input { accent-color: var(--accent-emphasis); margin: 0; }
+  .tree-filter { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap; }
+  .tree-filter input[type="checkbox"] { accent-color: var(--accent-emphasis); margin: 0; }
+  .tree-loc-filter {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .tree-loc-filter input {
+    width: 100%;
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 12px var(--mono);
+  }
   .file-tree-comments {
     flex: none; display: inline-flex; align-items: center; gap: 2px;
     font-size: 11px; font-weight: 600; color: var(--accent-fg);
@@ -821,7 +865,17 @@ cat >"$out" <<EOF
 <div class="app-shell">
   <aside class="file-tree" aria-label="Changed files">
     <div class="file-tree-title"><span>Files</span><button type="button" class="sidebar-toggle" id="sidebar-toggle-tree" title="Collapse files sidebar" aria-label="Collapse files sidebar"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 3.5h11v9h-11z"/><path d="M6 3.5v9"/></svg></button></div>
-    <div class="file-tree-search"><input id="file-search" type="search" placeholder="Filter files..."></div>
+    <div class="file-tree-search">
+      <div class="file-tree-search-row">
+        <input id="file-search" type="search" placeholder="Filter files...">
+        <button type="button" id="file-filter-toggle" class="filter-toggle" title="Show file filters" aria-label="Show file filters" aria-pressed="false">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11l-4.2 4.7v3.3l-2.6 1V8.2z"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="file-tree-filters" id="file-filters">
+      <label class="tree-filter tree-loc-filter"><span>Changed LoC &gt;</span><input type="number" id="min-changed-loc" min="0" step="1" inputmode="numeric" aria-label="Changed lines greater than"></label>
+    </div>
     <div class="tree-meta">
       <span class="tree-progress" id="tree-progress"></span>
       <label class="tree-filter"><input type="checkbox" id="unreviewed-only"> Unreviewed only</label>
@@ -983,6 +1037,8 @@ const viewedStorageKey = "gdiff-viewed-files:v2:" + viewStorageScope;
 const collapsedDirsStorageKey = "gdiff-collapsed-dirs:" + viewStorageScope;
 const sidebarStorageKey = "gdiff-sidebar-collapsed:" + viewStorageScope;
 const unreviewedStorageKey = "gdiff-unreviewed-only:" + viewStorageScope;
+const locFilterStorageKey = "gdiff-min-changed-loc:" + viewStorageScope;
+const filtersOpenStorageKey = "gdiff-file-filters-open:" + viewStorageScope;
 const themeStorageKey = "gdiff-theme-mode:" + viewStorageScope;
 const gitAddStorageKey = "gdiff-gitadd-files:" + viewStorageScope;
 let gitAddSelected = new Set(JSON.parse(localStorage.getItem(gitAddStorageKey) || "[]"));
@@ -991,6 +1047,9 @@ const expandedItemModes = new Map();
 let collapsedDirs = new Set(JSON.parse(localStorage.getItem(collapsedDirsStorageKey) || "[]"));
 let sidebarCollapsed = localStorage.getItem(sidebarStorageKey) === "1";
 let showUnreviewedOnly = localStorage.getItem(unreviewedStorageKey) === "1";
+let minChangedLoc = Number.parseInt(localStorage.getItem(locFilterStorageKey) || "0", 10);
+if (!Number.isFinite(minChangedLoc) || minChangedLoc < 0) minChangedLoc = 0;
+let fileFiltersOpen = localStorage.getItem(filtersOpenStorageKey) === "1" || minChangedLoc > 0;
 let darkMode = localStorage.getItem(themeStorageKey) === "dark";
 let fileFilter = "";
 let activeItemId = null;
@@ -1137,6 +1196,22 @@ function setSidebarCollapsed(collapsed) {
   sidebarCollapsed = collapsed;
   localStorage.setItem(sidebarStorageKey, sidebarCollapsed ? "1" : "0");
   syncSidebarCollapsed();
+}
+
+function syncFileFilters() {
+  const panel = document.getElementById("file-filters");
+  const toggle = document.getElementById("file-filter-toggle");
+  if (!panel || !toggle) return;
+  panel.classList.toggle("is-open", fileFiltersOpen);
+  toggle.setAttribute("aria-pressed", fileFiltersOpen ? "true" : "false");
+  toggle.title = fileFiltersOpen ? "Hide file filters" : "Show file filters";
+  toggle.setAttribute("aria-label", toggle.title);
+}
+
+function setFileFiltersOpen(open) {
+  fileFiltersOpen = open;
+  localStorage.setItem(filtersOpenStorageKey, fileFiltersOpen ? "1" : "0");
+  syncFileFilters();
 }
 
 function parseItems(mode) {
@@ -1415,6 +1490,11 @@ function fileStat(fileDiff) {
   return { add: Number.isFinite(add) ? add : null, del: Number.isFinite(del) ? del : null };
 }
 
+function changedLineCount(item) {
+  const stat = fileStat(item.fileDiff);
+  return (stat.add || 0) + (stat.del || 0);
+}
+
 function fileStatusGlyph(fileDiff, stat) {
   const type = String(fileDiff.type || fileDiff.status || fileDiff.changeType || "").toLowerCase();
   if (fileDiff.isNew || type.startsWith("a") || (stat.add && stat.del === 0)) return { ch: "A", cls: "s-add" };
@@ -1449,6 +1529,7 @@ function renderFileList() {
   const items = baseItems
     .filter(item => !filter || item.fileDiff.name.toLowerCase().includes(filter))
     .filter(item => !showUnreviewedOnly || !isFileViewed(item))
+    .filter(item => !minChangedLoc || changedLineCount(item) > minChangedLoc)
     .slice()
     .sort((a, b) => a.fileDiff.name.localeCompare(b.fileDiff.name));
   for (const item of items) {
@@ -2462,11 +2543,13 @@ document.getElementById("stats").innerHTML =
   '<span class="stat-del">−$total_del</span>';
 syncViewToggle();
 syncSidebarCollapsed();
+syncFileFilters();
 document.querySelectorAll("[data-diff-style]").forEach(button => {
   button.addEventListener("click", () => setDiffStyle(button.dataset.diffStyle));
 });
 document.getElementById("sidebar-toggle-top").addEventListener("click", () => setSidebarCollapsed(!sidebarCollapsed));
 document.getElementById("sidebar-toggle-tree").addEventListener("click", () => setSidebarCollapsed(true));
+document.getElementById("file-filter-toggle").addEventListener("click", () => setFileFiltersOpen(!fileFiltersOpen));
 document.getElementById("file-search").addEventListener("input", event => {
   fileFilter = event.target.value;
   renderFileList();
@@ -2536,6 +2619,15 @@ document.getElementById("theme-toggle").addEventListener("click", () => applyThe
 document.getElementById("help-toggle").addEventListener("click", toggleHelp);
 document.getElementById("help-overlay").addEventListener("click", event => {
   if (event.target.id === "help-overlay") closeHelp();
+});
+const minChangedLocInput = document.getElementById("min-changed-loc");
+minChangedLocInput.value = minChangedLoc ? String(minChangedLoc) : "";
+minChangedLocInput.addEventListener("input", () => {
+  const next = Number.parseInt(minChangedLocInput.value, 10);
+  minChangedLoc = Number.isFinite(next) && next > 0 ? next : 0;
+  if (minChangedLoc) localStorage.setItem(locFilterStorageKey, String(minChangedLoc));
+  else localStorage.removeItem(locFilterStorageKey);
+  renderFileList();
 });
 const unreviewedToggle = document.getElementById("unreviewed-only");
 unreviewedToggle.checked = showUnreviewedOnly;
