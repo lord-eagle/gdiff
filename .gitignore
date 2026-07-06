@@ -2,3 +2,4 @@
 *.swp
 node_modules/
 .gdiff-review.json
+/solo.yml
